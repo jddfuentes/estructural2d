@@ -1,0 +1,5 @@
+# Runtime — probado con Python 3.10 a 3.13 (resolución verificada para ambos extremos)
+streamlit==1.65.0
+numpy==2.2.6
+pandas==2.3.3
+plotly==7.1.0

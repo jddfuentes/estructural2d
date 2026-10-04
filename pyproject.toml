@@ -1,0 +1,39 @@
+[project]
+name = "estructural2d"
+version = "0.1.0"
+description = "MVP de predimensionamiento y cálculo estructural 2D (vigas y pórticos)"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.10"
+files = ["core", "ui", "app.py"]
+strict = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["plotly.*", "anastruct.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# La UI se tipa, pero sin exigir strict sobre APIs dinámicas de Streamlit/Plotly
+module = ["ui.*", "app"]
+disallow_any_generics = false
+disallow_untyped_calls = false
+warn_return_any = false
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+# E741: nombres de ingeniería (I, l) son intencionales en fórmulas
+ignore = ["E741", "SIM300"]  # SIM300: `x == pytest.approx(...)` es la forma idiomática
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "ui"]
