@@ -3,6 +3,9 @@
 pytest==9.1.1
 mypy==2.4.0
 pandas-stubs==2.3.3.251219
+types-reportlab==5.0.0.20260911
 ruff==0.16.10
 # Verificación cruzada del solver (tests/test_frames.py::test_cross_check_anastruct_portal)
 anastruct==1.7.0
+# Lectura de PDF en tests/test_reports.py (verificación del contenido de la memoria)
+pypdf==6.19.0

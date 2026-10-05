@@ -38,7 +38,8 @@ app.py            Orquestación Streamlit. NO calcula nada.
       ├── builders.py      build_beam(), build_portal_frame(): definición "de ingeniero" -> Model
       ├── solver.py        solve(model) -> Results  (función pura)
       ├── verification.py  check_safety() -> SafetyCheck (FS, estado OK/ALERTA/FLUENCIA)
-      └── design.py        suggest_section(): perfil más liviano que verifica
+      ├── design.py        suggest_section(): perfil más liviano que verifica
+      └── reports.py       build_pdf_report() -> bytes: memoria de cálculo A4 (ReportLab)
 tests/            pytest, casos analíticos con fórmula de referencia
 ```
 
@@ -47,14 +48,20 @@ Regla dura (se verifica en revisión):
 | Módulo | Puede importar | NO puede importar |
 |---|---|---|
 | `core/*` | stdlib, `numpy`, otros `core/*` | `streamlit`, `plotly`, `pandas`, `ui/*` |
+| `core/reports.py` | lo anterior + `reportlab` | ídem; y ningún otro módulo del core importa `reportlab` ni `core.reports` |
 | `ui/plots.py` | `core`, `numpy`, `plotly` | `streamlit` |
 | `ui/inputs.py`, `app.py` | todo | — |
 
 Chequeo rápido: `grep -rnE "streamlit|plotly|pandas" core/` debe devolver vacío.
+Ambas reglas están automatizadas en `tests/test_architecture_and_app.py`.
+`core/__init__.py` **no** reexporta `build_pdf_report`: importar `core` no debe arrastrar ReportLab.
 
 ## 4. Unidades y convenciones de signo
 
-**Core: SI-mm sin excepciones.**
+**Core: SI-mm sin excepciones** en datos, cálculos y valores devueltos.
+Única excepción, de presentación: `core/reports.py` convierte a unidades de ingeniería
+**sólo para imprimir** (constantes `_M`, `_KN`, `_KNM`, `_CM*` al inicio del módulo);
+nunca devuelve ni pasa números convertidos al resto del core.
 
 | Magnitud | Core | UI (sólo `ui/`) |
 |---|---|---|
@@ -91,6 +98,8 @@ core.solver.Results.extreme(quantity: str) -> Extreme      # "N","V","M","sigma"
 core.verification.check_safety(model, results, fs_min=1.5) -> SafetyCheck
 core.builders.build_beam(...) / build_portal_frame(...) -> Model
 core.design.suggest_section(build, family, fs_min, max_deflection=None) -> Suggestion | None
+core.reports.build_pdf_report(model, results, check, project_title="Memoria de Cálculo", author="",
+                              *, date=None, reference_length=None) -> bytes   # empieza con b"%PDF"
 ui.plots.plot_structure(model, results=None, deformed_scale=None, ...) -> go.Figure
 ui.plots.plot_diagram(model, results, quantity, moment_on_tension_side=True) -> go.Figure
 ```
@@ -143,7 +152,8 @@ Mensajes en castellano y accionables (la UI los muestra tal cual).
 - **Checklist de revisión de todo cambio en `core/`:**
   1. Equilibrio global: ΣF y ΣM de cargas + reacciones = 0.
   2. Signos: carga hacia abajo en viga simple ⇒ M > 0 en el tramo, δ < 0.
-  3. Unidades: ninguna conversión ×1e3 / ×1e6 dentro de `core/`.
+  3. Unidades: ninguna conversión ×1e3 / ×1e6 dentro de `core/` (salvo la de impresión de
+     `core/reports.py`, §4).
   4. Caso límite: barra única sin nodos intermedios da el mismo resultado que mallada.
   5. Inestabilidad: mecanismo ⇒ `StructuralError`, nunca resultados basura.
 - **Cada test cita su fórmula** en el nombre o docstring (p. ej. `δ = 5qL⁴/384EI`).
@@ -180,7 +190,8 @@ Backlog priorizado (no implementar sin tarea explícita):
 4. Tensión de corte (τ = VQ/It) y von Mises combinada.
 5. Flexión en eje débil y secciones asimétricas (ya soportadas en `Section` vía `c_top/c_bot`).
 6. Pórticos genéricos (editor de nodos/barras) y cargas térmicas.
-7. Reporte PDF de memoria de cálculo.
+7. ~~Reporte PDF de memoria de cálculo~~ → hecho (`core/reports.py`). Pendiente: incluir
+   figuras de diagramas (requiere renderizar sin Plotly en el core o pasar PNG desde la UI).
 
 ## 10. Limitaciones que la UI debe seguir comunicando
 
