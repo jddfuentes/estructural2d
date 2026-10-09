@@ -1,6 +1,8 @@
-# Runtime — probado con Python 3.10 a 3.13 (resolución verificada para ambos extremos)
+# Runtime — Python 3.10 a 3.14. numpy 2.3+ exige Python >= 3.11 y numpy 2.2 no tiene wheels para 3.14,
+# por eso se fija una versión por rango de intérprete.
 streamlit==1.65.0
-numpy==2.2.6
+numpy==2.2.6; python_version < "3.11"
+numpy==2.3.5; python_version >= "3.11"
 pandas==2.3.3
 plotly==7.1.0
 reportlab==5.0.1
