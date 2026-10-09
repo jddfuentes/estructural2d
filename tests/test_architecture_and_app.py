@@ -70,3 +70,4 @@ def test_app_smoke(kind):
     assert not at.error, [e.value for e in at.error]
     labels = [m.label for m in at.metric]
     assert "σ máx" in labels and "δ máx" in labels
+    assert "Descargar memoria" in [button.label for button in at.download_button]

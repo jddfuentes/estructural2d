@@ -57,6 +57,9 @@ Regla dura (se verifica en revisión):
 Chequeo rápido: `grep -rnE "streamlit|plotly|pandas" core/` debe devolver vacío.
 Ambas reglas están automatizadas en `tests/test_architecture_and_app.py`.
 `core/__init__.py` **no** reexporta `build_pdf_report`: importar `core` no debe arrastrar ReportLab.
+Excepción a "sin I/O": `core/reports.py` lee **sólo** las fuentes de `core/fonts/`, una vez al
+importarse. Las figuras del PDF se dibujan con `reportlab.graphics` desde `Model`/`Results`
+(no se exportan figuras Plotly: evita depender de Chrome/kaleido y mantiene el core sin Plotly).
 
 ## 4. Unidades y convenciones de signo
 

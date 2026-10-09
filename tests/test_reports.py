@@ -101,3 +101,95 @@ def test_empty_title_and_default_date():
     pdf = build_pdf_report(m, r, c, "   ", "")
     assert pdf.startswith(b"%PDF")
     assert f"{dt.date.today():%d/%m/%Y}" in _text(pdf)
+
+
+# --------------------------------------------------------------------------- #
+# Encabezado, tipografía y figuras
+# --------------------------------------------------------------------------- #
+
+
+def _pages(pdf: bytes) -> list[str]:
+    pypdf = pytest.importorskip("pypdf")
+    import io
+
+    return [p.extract_text() for p in pypdf.PdfReader(io.BytesIO(pdf)).pages]
+
+
+def test_default_title_not_duplicated():
+    """Con el título por defecto, 'memoria de cálculo' aparece una sola vez en la portada."""
+    m, r, c = _beam()
+    first = _pages(build_pdf_report(m, r, c, date=DATE))[0]
+    assert first.casefold().count("memoria de cálculo") == 1
+
+
+def test_custom_title_once_per_page():
+    """Título grande en la pág. 1; en las siguientes, sólo en el encabezado."""
+    m, r, c = _portal()
+    pages = _pages(build_pdf_report(m, r, c, "Pórtico nave de bombas", date=DATE))
+    assert len(pages) >= 2
+    assert all(p.count("Pórtico nave de bombas") == 1 for p in pages)
+
+
+def test_unicode_font_embedded():
+    """DejaVu Sans embebida: kN·m (U+00B7) y σ/δ se imprimen como texto real en cualquier visor."""
+    m, r, c = _beam()
+    pdf = build_pdf_report(m, r, c, date=DATE)
+    assert b"DejaVuSans" in pdf
+    text = _text(pdf)
+    assert "kN·m" in text and "kN-m" not in text
+    assert "σ" in text and "δ" in text
+
+
+@pytest.mark.parametrize("builder,n_figs", [(_beam, 6), (_portal, 7)])
+def test_figures_numbered(builder, n_figs):
+    """Convenciones + esquema + diagramas + deformada.
+
+    Viga: M, V, σ (N nulo) -> 6 figuras. Pórtico: M, V, N, σ -> 7 figuras.
+    """
+    m, r, c = builder()
+    text = _text(build_pdf_report(m, r, c, date=DATE))
+    assert f"Figura {n_figs}." in text
+    assert f"Figura {n_figs + 1}." not in text
+    for key in ("Esquema estático", "Deformada amplificada", "Diagrama de momento flector M"):
+        assert key in text
+
+
+def test_null_diagram_reported_not_drawn():
+    m, r, c = _beam()
+    text = _text(build_pdf_report(m, r, c, date=DATE))
+    assert "Esfuerzo normal N: nulo en toda la estructura" in text
+    assert "Diagrama de esfuerzo normal N" not in text
+
+
+def test_figures_are_vector_and_optional():
+    """Figuras vectoriales (sin imágenes rasterizadas) y desactivables."""
+    m, r, c = _portal()
+    with_figs = build_pdf_report(m, r, c, date=DATE)
+    without = build_pdf_report(m, r, c, date=DATE, include_figures=False)
+    assert b"/Subtype /Image" not in with_figs
+    assert "Figura" not in _text(without)
+    assert len(without) < len(with_figs)
+
+
+def test_sign_references_present():
+    """Referencias de signo: figura de convenciones, ejes globales y locales x'-y' en pórticos."""
+    m, r, c = _portal()
+    text = " ".join(_text(build_pdf_report(m, r, c, date=DATE)).split())  # epígrafes partidos en líneas
+    for key in ("Convenciones de signos", "N > 0: tracción", "M > 0: tracción inferior", "+Mz",
+                "Ejes locales de barra", "x'", "y'", "Signo según ejes locales x'"):
+        assert key in text, key
+    mb, rb, cb = _beam()
+    beam_text = _text(build_pdf_report(mb, rb, cb, date=DATE))
+    assert "+M" in beam_text and "+V" in beam_text  # ejes con sentido positivo en los diagramas
+
+
+def test_glossary_section():
+    """Sección 6: notación con unidades, símbolos gráficos y términos; desactivable."""
+    m, r, c = _portal()
+    text = " ".join(_text(build_pdf_report(m, r, c, date=DATE)).split())
+    for key in ("6. Glosario y simbología", "6.1 Notación", "6.2 Símbolos gráficos", "6.3 Términos",
+                "Ejes locales de barra: x' del nodo i al nodo j", "Módulo resistente elástico, W = I /",
+                "Empotrado", "Articulado", "Móvil", "Lado traccionado", "sección 6 (Glosario y simbología)"):
+        assert key in text, key
+    without = _text(build_pdf_report(m, r, c, date=DATE, include_glossary=False))
+    assert "Glosario" not in without

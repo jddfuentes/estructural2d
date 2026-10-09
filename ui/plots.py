@@ -26,6 +26,7 @@ C_LOAD = "#C2410C"
 C_LOAD_Q = "#EA580C"
 C_DEFORMED = "#2563EB"
 C_GRID = "rgba(120,130,145,0.18)"
+C_REFERENCE = "#475569"
 DIAGRAM_COLORS = {"M": "#7C3AED", "V": "#0891B2", "N": "#16A34A", "sigma": "#DC2626", "uy": "#2563EB"}
 
 M_TO = 1e-3  # mm -> m
@@ -134,7 +135,27 @@ def plot_structure(
     pad = 0.18 * ext * M_TO
     xy = np.asarray(model.nodes) * M_TO
     fig.update_xaxes(range=[xy[:, 0].min() - pad, xy[:, 0].max() + pad])
+    _add_reference_axes(fig)
     return fig
+
+
+def _add_reference_axes(fig: go.Figure) -> None:
+    """Añade el sistema global X-Y y la convención del eje Z fuera del plano."""
+    arrow_style = dict(
+        xref="paper", yref="paper", axref="pixel", ayref="pixel",
+        showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=2,
+        arrowcolor=C_REFERENCE, font=dict(color=C_REFERENCE, size=12),
+        bgcolor="rgba(255,255,255,0.86)", borderpad=2,
+    )
+    fig.add_annotation(x=0.14, y=0.13, ax=-70, ay=0, text="+X", **arrow_style)
+    fig.add_annotation(x=0.04, y=0.23, ax=0, ay=70, text="+Y", **arrow_style)
+    fig.add_annotation(
+        x=0.04, y=0.30, xref="paper", yref="paper", showarrow=False,
+        text="<b>Ejes globales</b><br>+Z: sale del plano<br>+Mz: antihorario",
+        align="left", font=dict(color=C_REFERENCE, size=11),
+        bgcolor="rgba(255,255,255,0.86)", bordercolor=C_REFERENCE, borderwidth=1,
+        borderpad=4,
+    )
 
 
 def _member_dir_at(model: Model, node: int) -> tuple[float, float]:
