@@ -18,6 +18,7 @@ from core.solver import Results, StructuralError, solve
 from core.verification import SafetyCheck, Status, check_safety
 from ui.inputs import AppInputs, sidebar
 from ui.plots import plot_diagram, plot_structure
+from ui.theory import render_theory
 
 st.set_page_config(page_title="Estructural 2D · Predimensionamiento", page_icon="📐", layout="wide")
 
@@ -104,7 +105,7 @@ def main() -> None:
 
     # ---- Gráficos ---------------------------------------------------------- #
     tabs = st.tabs(["Estructura y deformada", "Momento M", "Corte V", "Normal N", "Tensión σ", "Reacciones",
-                    "Predimensionamiento"])
+                    "Predimensionamiento", "Bases teóricas"])
     with tabs[0]:
         st.plotly_chart(plot_structure(model, res, inp.deformed_scale), width="stretch")
     with tabs[1]:
@@ -126,6 +127,8 @@ def main() -> None:
         st.caption("Reacciones en ejes globales: Rx → +, Ry ↑ +, Mz antihorario +.")
     with tabs[6]:
         _design_tab(inp)
+    with tabs[7]:
+        render_theory()
 
 
 def _design_tab(inp: AppInputs) -> None:
