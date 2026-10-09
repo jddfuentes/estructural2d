@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 from xml.sax.saxutils import escape
@@ -38,6 +39,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from core.glossary import GRAPHIC_SYMBOLS, NOTATION, TERMS
 from core.materials import Material, Section
 from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model
 from core.solver import Results
@@ -424,6 +426,132 @@ def _section_limitations() -> list[Flowable]:
         "(CIRSOC 301 / AISC 360) firmada por profesional matriculado.",
     ]
     return [_h1("5. Limitaciones y alcance"), *(_bullet(t, "note") for t in items)]
+
+
+# --------------------------------------------------------------------------- #
+# 6. Glosario y simbología
+# --------------------------------------------------------------------------- #
+
+
+def _icon(kind: str, w: float = 54.0, h: float = 26.0) -> Drawing:
+    """Ícono de la simbología gráfica, dibujado con las mismas primitivas que las figuras."""
+    d = Drawing(w, h)
+    mid = w / 2
+    if kind in ("fixed", "pinned", "roller"):
+        y = h - 6.0 if kind != "fixed" else h / 2
+        x0 = 12.0 if kind == "fixed" else 6.0
+        _line(d, (x0, y), (w - 6.0, y), C_MEMBER, 2.0)
+        st = {"fixed": SupportType.FIXED, "pinned": SupportType.PINNED, "roller": SupportType.ROLLER}[kind]
+        _draw_support(d, (x0 if kind == "fixed" else mid, y), st, (1.0, 0.0), u=6.0)
+    elif kind == "point":
+        _line(d, (6.0, 5.0), (w - 6.0, 5.0), C_MEMBER, 2.0)
+        _arrow(d, (mid, h - 1.0), (mid, 6.2), C_LOAD, 1.4, 5.5)
+    elif kind == "dist":
+        _line(d, (6.0, 5.0), (w - 6.0, 5.0), C_MEMBER, 2.0)
+        xs = np.linspace(8.0, w - 8.0, 5)
+        for x in xs:
+            _arrow(d, (float(x), h - 4.0), (float(x), 6.2), C_LOAD_Q, 0.7, 3.4)
+        _line(d, (8.0, h - 4.0), (w - 8.0, h - 4.0), C_LOAD_Q, 0.9)
+    elif kind == "moment":
+        r = 8.0
+        arc = [(mid + r * math.cos(t), h / 2 + r * math.sin(t)) for t in np.linspace(-0.8, 3.9, 28)]
+        _poly(d, arc[:-2], C_LOAD, 1.3)
+        _arrow(d, arc[-4], arc[-1], C_LOAD, 1.3, 4.5)
+        d.add(Circle(mid, h / 2, 1.3, fillColor=C_MEMBER, strokeColor=None))
+    elif kind == "global":
+        _draw_triad(d, (mid - 10.0, 3.0), 14.0)
+    elif kind == "local":
+        a, b = (8.0, 4.0), (w - 8.0, h - 6.0)
+        _line(d, a, b, C_MEMBER, 1.8)
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        c, s = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+        o = (mid - s * 3.0, h / 2 - 1.0 + c * 3.0)
+        _arrow(d, o, (o[0] + c * 12.0, o[1] + s * 12.0), C_AXIS, 0.8, 3.4)
+        _arrow(d, o, (o[0] - s * 9.0, o[1] + c * 9.0), C_AXIS, 0.8, 3.4)
+    elif kind == "deformed":
+        _line(d, (6.0, h - 8.0), (w - 6.0, h - 8.0), C_GHOST, 1.2)
+        xs = np.linspace(6.0, w - 6.0, 20)
+        _poly(d, [(float(x), h - 8.0 - 10.0 * math.sin(math.pi * (x - 6.0) / (w - 12.0))) for x in xs],
+              C_DEFORMED, 1.6)
+    elif kind == "diagram":
+        xs = np.linspace(6.0, w - 6.0, 20)
+        pts = [(float(x), h - 6.0 - 14.0 * math.sin(math.pi * (x - 6.0) / (w - 12.0))) for x in xs]
+        ring = [(6.0, h - 6.0), *pts, (w - 6.0, h - 6.0)]
+        d.add(Polygon([cc for p in ring for cc in p], fillColor=_tint(C_DIAG["M"], 0.18), strokeColor=None))
+        _poly(d, pts, C_DIAG["M"], 1.2)
+        _line(d, (6.0, h - 6.0), (w - 6.0, h - 6.0), C_MEMBER, 1.4)
+    elif kind == "dim":
+        _draw_dim(d, (6.0, h / 2 - 3.0), (w - 6.0, h / 2 - 3.0), "2.50", True)
+    return d
+
+
+_SCRIPT_RE = re.compile(r"([_^])\{([^}]*)\}")
+_GREEK_RE = re.compile("[σδνρθΣ]")
+
+
+def _rl(text: str) -> str:
+    """Mini-notación de core.glossary (x_{sub}, x^{sup}) -> markup de Paragraph de ReportLab."""
+    out = _SCRIPT_RE.sub(lambda m: f"<sub>{m.group(2)}</sub>" if m.group(1) == "_" else
+                         f"<super>{m.group(2)}</super>", escape(text))
+    if not _UNICODE:  # sin DejaVu: griegas vía fuente Symbol estándar
+        out = _GREEK_RE.sub(lambda m: f'<font face="Symbol">{m.group(0)}</font>', out)
+    return out
+
+
+def _section_glossary() -> list[Flowable]:
+    """Sección 6. El contenido vive en core/glossary.py (fuente única con la wiki de la app)."""
+    out: list[Flowable] = [_h1("6. Glosario y simbología"), _h2("6.1 Notación")]
+
+    # Notación: tabla con filas de grupo
+    data: list[list[Any]] = [[_p("Símbolo", "cell_h"), _p("Descripción", "cell_h"), _p("Unidad", "cell_hr")]]
+    style: list[tuple[Any, ...]] = [
+        ("BACKGROUND", (0, 0), (-1, 0), HEAD_BG),
+        ("LINEABOVE", (0, 0), (-1, 0), 0.8, ACCENT),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.5, ACCENT),
+        ("LINEBELOW", (0, -1), (-1, -1), 0.8, ACCENT),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 2.2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2.2),
+    ]
+    for group in NOTATION:
+        r = len(data)
+        data.append([_p(f"<b>{escape(group.title)}</b>", "cell"), "", ""])
+        style += [("SPAN", (0, r), (-1, r)), ("BACKGROUND", (0, r), (-1, r), ZEBRA),
+                  ("LINEABOVE", (0, r), (-1, r), 0.3, RULE)]
+        for e in group.entries:
+            data.append([_p(f"<b>{_rl(e.symbol)}</b>", "cell"), _p(_rl(e.description), "cell"),
+                         _p(_rl(e.unit), "cell_r")])
+    t = Table(data, colWidths=[0.16 * CONTENT_W, 0.70 * CONTENT_W, 0.14 * CONTENT_W], repeatRows=1,
+              hAlign="LEFT")
+    t.setStyle(TableStyle(style))
+    out.append(t)
+
+    # Símbolos gráficos: ícono vectorial + nombre + significado
+    out.append(_h2("6.2 Símbolos gráficos"))
+    gdata: list[list[Any]] = [[_p("Símbolo", "cell_h"), _p("Nombre", "cell_h"), _p("Significado", "cell_h")]]
+    for gs in GRAPHIC_SYMBOLS:
+        gdata.append([_icon(gs.kind), _p(f"<b>{_rl(gs.name)}</b>", "cell"), _p(_rl(gs.meaning), "cell")])
+    g = Table(gdata, colWidths=[0.14 * CONTENT_W, 0.20 * CONTENT_W, 0.66 * CONTENT_W], repeatRows=1,
+              hAlign="LEFT")
+    gstyle: list[tuple[Any, ...]] = [
+        ("BACKGROUND", (0, 0), (-1, 0), HEAD_BG),
+        ("LINEABOVE", (0, 0), (-1, 0), 0.8, ACCENT),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.5, ACCENT),
+        ("LINEBELOW", (0, 1), (-1, -2), 0.25, RULE),
+        ("LINEBELOW", (0, -1), (-1, -1), 0.8, ACCENT),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 1), (0, -1), "CENTER"),
+        ("TOPPADDING", (0, 1), (-1, -1), 2.5),
+        ("BOTTOMPADDING", (0, 1), (-1, -1), 2.5),
+    ]
+    g.setStyle(TableStyle(gstyle))
+    out.append(g)
+
+    # Términos
+    out.append(_h2("6.3 Términos"))
+    rows = [[f"<b>{_rl(t.term)}</b>", _rl(t.definition)] for t in TERMS]
+    out.append(_table(["Término", "Definición"], rows, [0.24, 0.76]))
+    return out
 
 
 # --------------------------------------------------------------------------- #

@@ -39,7 +39,9 @@ app.py            Orquestación Streamlit. NO calcula nada.
       ├── solver.py        solve(model) -> Results  (función pura)
       ├── verification.py  check_safety() -> SafetyCheck (FS, estado OK/ALERTA/FLUENCIA)
       ├── design.py        suggest_section(): perfil más liviano que verifica
-      └── reports.py       build_pdf_report() -> bytes: memoria de cálculo A4 (ReportLab)
+      ├── glossary.py      Glosario y simbología: FUENTE ÚNICA para el PDF y la wiki (to_markdown())
+      ├── reports.py       build_pdf_report() -> bytes: memoria A4 con figuras vectoriales (ReportLab)
+      └── fonts/           DejaVu Sans (TTF + licencia) embebida en el PDF; no tocar sin motivo
 tests/            pytest, casos analíticos con fórmula de referencia
 ```
 
@@ -99,7 +101,10 @@ core.verification.check_safety(model, results, fs_min=1.5) -> SafetyCheck
 core.builders.build_beam(...) / build_portal_frame(...) -> Model
 core.design.suggest_section(build, family, fs_min, max_deflection=None) -> Suggestion | None
 core.reports.build_pdf_report(model, results, check, project_title="Memoria de Cálculo", author="",
-                              *, date=None, reference_length=None) -> bytes   # empieza con b"%PDF"
+                              *, date=None, reference_length=None,
+                              include_figures=True, include_glossary=True) -> bytes  # b"%PDF..."
+core.glossary.NOTATION / GRAPHIC_SYMBOLS / TERMS             # datos (mini-notación x_{sub}, x^{sup})
+core.glossary.to_markdown(include_graphics=True, heading_level=2) -> str  # para st.markdown (LaTeX $..$)
 ui.plots.plot_structure(model, results=None, deformed_scale=None, ...) -> go.Figure
 ui.plots.plot_diagram(model, results, quantity, moment_on_tension_side=True) -> go.Figure
 ```
@@ -190,8 +195,12 @@ Backlog priorizado (no implementar sin tarea explícita):
 4. Tensión de corte (τ = VQ/It) y von Mises combinada.
 5. Flexión en eje débil y secciones asimétricas (ya soportadas en `Section` vía `c_top/c_bot`).
 6. Pórticos genéricos (editor de nodos/barras) y cargas térmicas.
-7. ~~Reporte PDF de memoria de cálculo~~ → hecho (`core/reports.py`). Pendiente: incluir
-   figuras de diagramas (requiere renderizar sin Plotly en el core o pasar PNG desde la UI).
+7. ~~Reporte PDF de memoria de cálculo~~ → hecho (`core/reports.py`), con esquema de cargas,
+   deformada, diagramas N-V-M-σ vectoriales, convenciones de signo y glosario/simbología (§6 del PDF).
+   Si se cambia un gráfico de `ui/plots.py`, revisar que el equivalente del PDF siga la misma
+   convención (colores, M del lado traccionado). Todo símbolo, ícono o término nuevo que aparezca
+   en la memoria o en la app se agrega **sólo** a `core/glossary.py`: el PDF (sección 6) y la wiki
+   de la app lo leen de ahí; ninguno define glosario propio (hay test que lo controla).
 
 ## 10. Limitaciones que la UI debe seguir comunicando
 
