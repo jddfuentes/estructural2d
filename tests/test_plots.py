@@ -5,6 +5,7 @@ from __future__ import annotations
 from core.builders import BeamSupport, build_beam
 from core.materials import Material, custom
 from core.model import SupportType
+from core.solver import solve
 from ui.plots import plot_structure
 
 
@@ -18,7 +19,7 @@ def test_structure_plot_shows_global_reference_axes() -> None:
         material,
     )
 
-    figure = plot_structure(model, show_loads=False)
+    figure = plot_structure(model, solve(model), show_loads=False)
     texts = [annotation.text or "" for annotation in figure.layout.annotations]
 
     assert any("+X" in text for text in texts)
