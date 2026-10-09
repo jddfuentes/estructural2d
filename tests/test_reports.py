@@ -140,9 +140,12 @@ def test_unicode_font_embedded():
     assert "σ" in text and "δ" in text
 
 
-@pytest.mark.parametrize("builder,n_figs", [(_beam, 5), (_portal, 6)])
+@pytest.mark.parametrize("builder,n_figs", [(_beam, 6), (_portal, 7)])
 def test_figures_numbered(builder, n_figs):
-    """Viga: esquema + M, V, σ (N nulo) + deformada = 5. Pórtico: esquema + M, V, N, σ + deformada = 6."""
+    """Convenciones + esquema + diagramas + deformada.
+
+    Viga: M, V, σ (N nulo) -> 6 figuras. Pórtico: M, V, N, σ -> 7 figuras.
+    """
     m, r, c = builder()
     text = _text(build_pdf_report(m, r, c, date=DATE))
     assert f"Figura {n_figs}." in text
@@ -166,3 +169,15 @@ def test_figures_are_vector_and_optional():
     assert b"/Subtype /Image" not in with_figs
     assert "Figura" not in _text(without)
     assert len(without) < len(with_figs)
+
+
+def test_sign_references_present():
+    """Referencias de signo: figura de convenciones, ejes globales y locales x'-y' en pórticos."""
+    m, r, c = _portal()
+    text = " ".join(_text(build_pdf_report(m, r, c, date=DATE)).split())  # epígrafes partidos en líneas
+    for key in ("Convenciones de signos", "N > 0: tracción", "M > 0: tracción inferior", "+Mz",
+                "Ejes locales de barra", "x'", "y'", "Signo según ejes locales x'"):
+        assert key in text, key
+    mb, rb, cb = _beam()
+    beam_text = _text(build_pdf_report(mb, rb, cb, date=DATE))
+    assert "+M" in beam_text and "+V" in beam_text  # ejes con sentido positivo en los diagramas

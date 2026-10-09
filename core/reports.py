@@ -177,7 +177,7 @@ def build_pdf_report(
     figs = _Figures() if include_figures else None
     story: list[Flowable] = []
     story += _title_block(model, check, title, author, date)
-    story += _section_basis(check)
+    story += _section_basis(check, figs)
     story += _section_inputs(model, figs)
     story += _section_results(model, results, L_ref, figs)
     story += _section_verification(check)
@@ -293,7 +293,7 @@ def _title_block(model: Model, check: SafetyCheck, title: str, author: str, date
     ]
 
 
-def _section_basis(check: SafetyCheck) -> list[Flowable]:
+def _section_basis(check: SafetyCheck, figs: _Figures | None) -> list[Flowable]:
     items = [
         "Análisis elástico lineal de primer orden por el método directo de rigidez; elementos de "
         "pórtico plano Euler-Bernoulli (sin deformación por corte). Solicitaciones y elástica exactas "
@@ -306,7 +306,12 @@ def _section_basis(check: SafetyCheck) -> list[Flowable]:
         f"{_g('s')} = N/A ± M·c/I; FS = S<sub>y</sub> / {_g('s')}<sub>máx</sub> "
         f"≥ FS<sub>adm</sub> = {check.fs_min:g}.",
     ]
-    return [_h1("1. Bases de cálculo"), *(_bullet(t) for t in items)]
+    out: list[Flowable] = [_h1("1. Bases de cálculo"), *(_bullet(t) for t in items)]
+    if figs is not None:
+        out.append(figs.add(_fig_conventions(CONTENT_W),
+                            "Convenciones de signos usadas en toda la memoria: ejes globales, "
+                            "solicitaciones positivas sobre un elemento dx y ejes locales de barra."))
+    return out
 
 
 def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
@@ -387,8 +392,9 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
     # 2.5 Esquema
     if figs is not None:
         out.append(figs.add(_fig_structure(model, CONTENT_W),
-                            "Esquema estático: apoyos, cargas de usuario y numeración de nodos. "
-                            "Cotas en m.", heading=_h2("2.5 Esquema estático y cargas")))
+                            "Esquema estático: apoyos, cargas de usuario, numeración de nodos, ejes "
+                            "globales" + ("" if model.is_horizontal_beam() else " y locales x'-y' por barra")
+                            + ". Cotas en m.", heading=_h2("2.5 Esquema estático y cargas")))
     return out
 
 
@@ -569,6 +575,7 @@ C_LOAD = colors.HexColor("#C2410C")
 C_LOAD_Q = colors.HexColor("#EA580C")
 C_DEFORMED = colors.HexColor("#2563EB")
 C_DIM = colors.HexColor("#7B8794")
+C_AXIS = colors.HexColor("#334E68")  # ejes de referencia (globales y locales)
 C_DIAG = {"M": colors.HexColor("#7C3AED"), "V": colors.HexColor("#0891B2"),
           "N": colors.HexColor("#16A34A"), "sigma": colors.HexColor("#DC2626")}
 
@@ -858,6 +865,108 @@ def _draw_dimensions(d: Drawing, model: Model, view: _View, below: float) -> Non
               False)
 
 
+def _draw_triad(d: Drawing, o: Pt, size: float = 15.0, moment: bool = True) -> None:
+    """Terna de ejes globales X-Y con origen en `o` y sentido positivo de Mz (antihorario)."""
+    _arrow(d, o, (o[0] + size, o[1]), C_AXIS, 0.9, 4.2)
+    _arrow(d, o, (o[0], o[1] + size), C_AXIS, 0.9, 4.2)
+    _label(d, o[0] + size + 2.0, o[1] - 2.4, "X", 6.8, C_AXIS, anchor="start", bold=True, halo=False)
+    _label(d, o[0], o[1] + size + 2.2, "Y", 6.8, C_AXIS, bold=True, halo=False)
+    d.add(Circle(o[0], o[1], 1.1, fillColor=C_AXIS, strokeColor=None))
+    if moment:
+        r = 0.55 * size
+        arc = [(o[0] + r * math.cos(t), o[1] + r * math.sin(t)) for t in np.linspace(0.18, 1.4, 14)]
+        _poly(d, arc[:-1], C_AXIS, 0.7)
+        _arrow(d, arc[-3], arc[-1], C_AXIS, 0.7, 3.2)
+        _label(d, o[0] + 0.62 * size, o[1] + 0.62 * size, "+Mz", 5.8, C_AXIS, anchor="start", halo=False)
+
+
+def _draw_local_axes(d: Drawing, model: Model, view: _View, t: float = 0.28, L: float = 13.0,
+                     with_y: bool = True) -> None:
+    """Ejes locales de cada barra: x' de i a j; y' = x' girado +90°. Signos de N y V referidos a ellos."""
+    for m, mem in enumerate(model.members):
+        c, s = model.member_cos_sin(m)
+        a, b = view(*model.nodes[mem.i]), view(*model.nodes[mem.j])
+        o = (a[0] + (b[0] - a[0]) * t - s * 5.0, a[1] + (b[1] - a[1]) * t + c * 5.0)  # corrido hacia +y'
+        _arrow(d, o, (o[0] + c * L, o[1] + s * L), C_AXIS, 0.8, 3.6)
+        _label(d, o[0] + c * (L + 5.0), o[1] + s * (L + 5.0) - 2.3, "x'", 6.2, C_AXIS, bold=True)
+        if with_y:
+            _arrow(d, o, (o[0] - s * 0.75 * L, o[1] + c * 0.75 * L), C_AXIS, 0.8, 3.6)
+            _label(d, o[0] - s * (0.75 * L + 5.0), o[1] + c * (0.75 * L + 5.0) - 2.3, "y'", 6.2, C_AXIS,
+                   bold=True)
+
+
+def _fig_conventions(w: float, h: float = 92.0) -> Drawing:
+    """Convenciones de signos: ejes globales, N-V-M positivos sobre un elemento dx, ejes locales."""
+    d = Drawing(w, h)
+    cw = w / 5.0
+    cy = 48.0
+    ew, eh = 30.0, 16.0  # elemento diferencial
+
+    def element(cx: float) -> None:
+        style: dict[str, Any] = {"fillColor": _tint(C_MEMBER, 0.10), "strokeColor": C_MEMBER,
+                                 "strokeWidth": 0.8}
+        d.add(Rect(cx - ew / 2, cy - eh / 2, ew, eh, **style))
+        _label(d, cx, cy - 2.4, "dx", 6.0, MUTED, halo=False)
+
+    def caption(cx: float, line1: str, line2: str = "") -> None:
+        _label(d, cx, 14.0, line1, 6.8, INK, halo=False)
+        if line2:
+            _label(d, cx, 5.5, line2, 6.2, MUTED, halo=False)
+
+    # 1) Ejes globales
+    cx = cw * 0.5
+    _draw_triad(d, (cx - 12.0, cy - 14.0), 26.0)
+    caption(cx, "Ejes globales", "Mz y reacciones: + antihorario")
+    # 2) N > 0: tracción (flechas salientes)
+    cx = cw * 1.5
+    element(cx)
+    for sgn in (-1.0, 1.0):
+        face = cx + sgn * ew / 2
+        _arrow(d, (face, cy), (face + sgn * 15.0, cy), C_DIAG["N"], 1.2, 4.5)
+        _label(d, face + sgn * 9.0, cy + 4.0, "N", 6.8, C_DIAG["N"], bold=True, halo=False)
+    caption(cx, "N > 0: tracción")
+    # 3) V > 0: horario (cara izq. hacia arriba, cara der. hacia abajo); V = dM/dx
+    cx = cw * 2.5
+    element(cx)
+    for sgn in (-1.0, 1.0):
+        xf = cx + sgn * (ew / 2 + 4.0)
+        up = sgn < 0  # cara izquierda: hacia arriba; cara derecha: hacia abajo
+        _arrow(d, (xf, cy - 13.0 if up else cy + 13.0), (xf, cy + 13.0 if up else cy - 13.0),
+               C_DIAG["V"], 1.2, 4.5)
+        _label(d, xf + sgn * 6.0, cy - 2.4, "V", 6.8, C_DIAG["V"], bold=True, halo=False)
+    caption(cx, "V > 0", "V = dM/dx")
+    # 4) M > 0: tracción inferior (cara izq. horario, cara der. antihorario)
+    cx = cw * 3.5
+    element(cx)
+    for sgn in (-1.0, 1.0):
+        fx = cx + sgn * ew / 2
+        ts = np.linspace(1.5 * math.pi, 0.5 * math.pi, 16) if sgn < 0 else np.linspace(-0.5 * math.pi,
+                                                                                      0.5 * math.pi, 16)
+        r = 10.0
+        arc = [(fx + sgn * 2.0 + r * math.cos(float(t)), cy + r * math.sin(float(t))) for t in ts]
+        arc = [p for p in arc if (p[0] - fx) * sgn >= -0.5]  # sólo el lado exterior
+        _poly(d, arc[:-1], C_DIAG["M"], 1.1)
+        _arrow(d, arc[-3], arc[-1], C_DIAG["M"], 1.1, 4.0)
+        _label(d, fx + sgn * 16.0, cy - 2.4, "M", 6.8, C_DIAG["M"], bold=True, halo=False)
+    caption(cx, "M > 0: tracción inferior", "(y' negativa)")
+    # 5) Ejes locales de una barra genérica
+    cx = cw * 4.5
+    i, j = (cx - 26.0, cy - 16.0), (cx + 22.0, cy + 14.0)
+    _line(d, i, j, C_MEMBER, 2.0)
+    for p, name, dx in ((i, "i", -6.0), (j, "j", 6.0)):
+        d.add(Circle(p[0], p[1], 1.8, fillColor=colors.white, strokeColor=C_MEMBER, strokeWidth=0.8))
+        _label(d, p[0] + dx, p[1] - 2.4, name, 6.8, C_MEMBER, bold=True, halo=False)
+    L = math.hypot(j[0] - i[0], j[1] - i[1])
+    c, s = (j[0] - i[0]) / L, (j[1] - i[1]) / L
+    o = ((i[0] + j[0]) / 2 - s * 4.0, (i[1] + j[1]) / 2 + c * 4.0)
+    _arrow(d, o, (o[0] + c * 16.0, o[1] + s * 16.0), C_AXIS, 0.9, 4.0)
+    _arrow(d, o, (o[0] - s * 12.0, o[1] + c * 12.0), C_AXIS, 0.9, 4.0)
+    _label(d, o[0] + c * 21.0, o[1] + s * 21.0 - 2.3, "x'", 6.8, C_AXIS, bold=True, halo=False)
+    _label(d, o[0] - s * 17.0, o[1] + c * 17.0 - 2.3, "y'", 6.8, C_AXIS, bold=True, halo=False)
+    caption(cx, "Ejes locales de barra", "x' de i a j · y' a +90°")
+    return d
+
+
 def _fig_structure(model: Model, w: float) -> Drawing:
     beam = model.is_horizontal_beam()
     pad = (34.0, 34.0, 62.0, 44.0) if beam else (64.0, 70.0, 56.0, 46.0)
@@ -870,6 +979,9 @@ def _fig_structure(model: Model, w: float) -> Drawing:
     _draw_nodal_loads(d, model, view)
     _draw_node_numbers(d, model, view)
     _draw_dimensions(d, model, view, below=34.0 if beam else 30.0)
+    _draw_triad(d, (8.0, h - 26.0))
+    if not beam:  # en vigas horizontales los locales coinciden con los globales
+        _draw_local_axes(d, model, view)
     if any(dl.label == SELF_WEIGHT for dl in model.distributed_loads):
         _label(d, 2.0, 3.0, "+ peso propio (incluido en el cálculo, no dibujado)", 6.5, MUTED,
                anchor="start", halo=False)
@@ -895,13 +1007,14 @@ def _fig_deformed(model: Model, results: Results, w: float) -> tuple[Drawing, fl
     deformed = [mr.points + k * mr.displacement for mr in results.members]
     pts: list[Pt] = list(model.nodes) + [(float(p[0]), float(p[1])) for arr in deformed for p in arr]
     beam = model.is_horizontal_beam()
-    pad = (24.0, 24.0, 22.0, 18.0)
+    pad = (46.0, 24.0, 22.0, 18.0)
     h = _auto_height(model, w, pad, 70.0, 150.0, extra=pts) if beam else \
         _auto_height(model, w, pad, 190.0, 280.0, extra=pts)
     d = Drawing(w, h)
     view = _fit(pts, w, h, pad)
     _draw_members(d, model, view, C_GHOST, 1.2)
     _draw_supports(d, model, view)
+    _draw_triad(d, (8.0, 8.0), 13.0, moment=False)
     for arr in deformed:
         _poly(d, [view(float(p[0]), float(p[1])) for p in arr], C_DEFORMED, 1.8)
     e = results.extreme("deflection")
@@ -930,7 +1043,7 @@ def _fig_beam_diagram(model: Model, results: Results, q: str, w: float, h: float
     vs = np.concatenate([_values(mr, q) for mr in results.members]) * f
     plot = -vs if q == "M" else vs
     L = float(xs.max())
-    pl, pr, pb, pt = 30.0, 14.0, 22.0, 16.0
+    pl, pr, pb, pt = 50.0, 24.0, 22.0, 16.0
     lo, hi = min(float(plot.min()), 0.0), max(float(plot.max()), 0.0)
     span = hi - lo if hi - lo > 1e-12 else 1.0
     sx, sy = (w - pl - pr) / L, (h - pb - pt) / span
@@ -946,6 +1059,20 @@ def _fig_beam_diagram(model: Model, results: Results, q: str, w: float, h: float
     d.add(Polygon([c for p in poly for c in p], fillColor=_tint(color, 0.16), strokeColor=None))
     _poly(d, poly[1:-1], color, 1.5)
     _line(d, P(0.0, 0.0), P(L, 0.0), C_MEMBER, 1.4)
+    # Eje x (sentido +x) y eje de la magnitud con flecha hacia su sentido positivo
+    z = P(L, 0.0)
+    _arrow(d, z, (z[0] + 14.0, z[1]), C_AXIS, 0.8, 4.0)
+    _label(d, z[0] + 16.0, z[1] - 2.4, "x", 6.8, C_AXIS, anchor="start", bold=True, halo=False)
+    xa, y_bot, y_top = pl - 16.0, pb - 4.0, h - pt + 4.0
+    pos_down = q == "M"  # M positivo (tracción inferior) se dibuja hacia abajo
+    tail, head = ((xa, y_top), (xa, y_bot)) if pos_down else ((xa, y_bot), (xa, y_top))
+    _arrow(d, tail, head, C_AXIS, 0.8, 4.0)
+    sym = {"M": "+M", "V": "+V", "N": "+N", "sigma": f"|{_gt('s')}|"}[q]
+    _label(d, xa, head[1] + (-9.0 if pos_down else 3.0), sym, 6.8, C_AXIS, bold=True, halo=False)
+    for val in sorted({0.0, float(vs.max()), float(vs.min())}):  # marcas con el valor real (con signo)
+        py = P(0.0, -val if pos_down else val)[1]
+        _line(d, (xa - 2.5, py), (xa + 2.5, py), C_AXIS, 0.7)
+        _label(d, xa - 4.0, py - 2.3, _short(val), 6.0, C_AXIS, anchor="end", halo=False)
     # Eje x: posiciones de nodos [m]
     last = -1e9
     for x in sorted({round(float(x), 6) for x, _ in ((nx - x0, 0) for nx, _ in model.nodes)}):
@@ -993,6 +1120,7 @@ def _fig_frame_diagram(model: Model, results: Results, q: str, w: float) -> Draw
             if abs(v[k]) > 0.03 * vmax:
                 labels.append((off[k], float(v[k]) * f))
     _draw_supports(d, model, view)
+    _draw_local_axes(d, model, view, t=0.42, L=11.0, with_y=False)
     placed: list[Pt] = []
     for (x, y), val in labels:  # evita rótulos superpuestos en nudos compartidos
         if any(math.hypot(x - a, y - b) < 14 for a, b in placed):
@@ -1017,7 +1145,9 @@ def _diagram_figures(model: Model, results: Results, figs: _Figures) -> list[Flo
     def cap(q: str) -> str:
         title, unit, _ = _DIAG_SPEC[q]
         title = (title[0].lower() + title[1:]).replace("σ", _g("s"))
-        extra = " Dibujado del lado traccionado." if q == "M" else ""
+        extra = " Dibujado del lado traccionado (+ hacia abajo en vigas)." if q == "M" else ""
+        if not beam and q in ("N", "V"):
+            extra += " Signo según ejes locales x' (de i a j) de cada barra."
         return f"Diagrama de {title} [{unit}].{extra}"
 
     if beam:
