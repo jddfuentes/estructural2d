@@ -181,3 +181,15 @@ def test_sign_references_present():
     mb, rb, cb = _beam()
     beam_text = _text(build_pdf_report(mb, rb, cb, date=DATE))
     assert "+M" in beam_text and "+V" in beam_text  # ejes con sentido positivo en los diagramas
+
+
+def test_glossary_section():
+    """Sección 6: notación con unidades, símbolos gráficos y términos; desactivable."""
+    m, r, c = _portal()
+    text = " ".join(_text(build_pdf_report(m, r, c, date=DATE)).split())
+    for key in ("6. Glosario y simbología", "6.1 Notación", "6.2 Símbolos gráficos", "6.3 Términos",
+                "Ejes locales de barra: x' del nodo i al nodo j", "Módulo resistente elástico, W = I /",
+                "Empotrado", "Articulado", "Móvil", "Lado traccionado", "sección 6 (Glosario y simbología)"):
+        assert key in text, key
+    without = _text(build_pdf_report(m, r, c, date=DATE, include_glossary=False))
+    assert "Glosario" not in without
