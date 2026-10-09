@@ -101,3 +101,68 @@ def test_empty_title_and_default_date():
     pdf = build_pdf_report(m, r, c, "   ", "")
     assert pdf.startswith(b"%PDF")
     assert f"{dt.date.today():%d/%m/%Y}" in _text(pdf)
+
+
+# --------------------------------------------------------------------------- #
+# Encabezado, tipografía y figuras
+# --------------------------------------------------------------------------- #
+
+
+def _pages(pdf: bytes) -> list[str]:
+    pypdf = pytest.importorskip("pypdf")
+    import io
+
+    return [p.extract_text() for p in pypdf.PdfReader(io.BytesIO(pdf)).pages]
+
+
+def test_default_title_not_duplicated():
+    """Con el título por defecto, 'memoria de cálculo' aparece una sola vez en la portada."""
+    m, r, c = _beam()
+    first = _pages(build_pdf_report(m, r, c, date=DATE))[0]
+    assert first.casefold().count("memoria de cálculo") == 1
+
+
+def test_custom_title_once_per_page():
+    """Título grande en la pág. 1; en las siguientes, sólo en el encabezado."""
+    m, r, c = _portal()
+    pages = _pages(build_pdf_report(m, r, c, "Pórtico nave de bombas", date=DATE))
+    assert len(pages) >= 2
+    assert all(p.count("Pórtico nave de bombas") == 1 for p in pages)
+
+
+def test_unicode_font_embedded():
+    """DejaVu Sans embebida: kN·m (U+00B7) y σ/δ se imprimen como texto real en cualquier visor."""
+    m, r, c = _beam()
+    pdf = build_pdf_report(m, r, c, date=DATE)
+    assert b"DejaVuSans" in pdf
+    text = _text(pdf)
+    assert "kN·m" in text and "kN-m" not in text
+    assert "σ" in text and "δ" in text
+
+
+@pytest.mark.parametrize("builder,n_figs", [(_beam, 5), (_portal, 6)])
+def test_figures_numbered(builder, n_figs):
+    """Viga: esquema + M, V, σ (N nulo) + deformada = 5. Pórtico: esquema + M, V, N, σ + deformada = 6."""
+    m, r, c = builder()
+    text = _text(build_pdf_report(m, r, c, date=DATE))
+    assert f"Figura {n_figs}." in text
+    assert f"Figura {n_figs + 1}." not in text
+    for key in ("Esquema estático", "Deformada amplificada", "Diagrama de momento flector M"):
+        assert key in text
+
+
+def test_null_diagram_reported_not_drawn():
+    m, r, c = _beam()
+    text = _text(build_pdf_report(m, r, c, date=DATE))
+    assert "Esfuerzo normal N: nulo en toda la estructura" in text
+    assert "Diagrama de esfuerzo normal N" not in text
+
+
+def test_figures_are_vector_and_optional():
+    """Figuras vectoriales (sin imágenes rasterizadas) y desactivables."""
+    m, r, c = _portal()
+    with_figs = build_pdf_report(m, r, c, date=DATE)
+    without = build_pdf_report(m, r, c, date=DATE, include_figures=False)
+    assert b"/Subtype /Image" not in with_figs
+    assert "Figura" not in _text(without)
+    assert len(without) < len(with_figs)

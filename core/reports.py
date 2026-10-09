@@ -5,10 +5,16 @@ unidades SI-mm y los MUESTRA en unidades de ingeniería (m, kN, kN/m, kN·m, cm�
 cm³). Las conversiones viven sólo en este módulo y nunca vuelven al resto del core.
 
 Función pública:
-    build_pdf_report(model, results, check, project_title, author, *, date, reference_length) -> bytes
+    build_pdf_report(model, results, check, project_title, author, *, date, reference_length,
+                     include_figures) -> bytes
 
-Pura: no lee ni escribe archivos, no muta sus argumentos y, con `date` fijo, devuelve
-exactamente los mismos bytes (PDF "invariant": sin marcas de tiempo ni ID aleatorio).
+Pura: no muta sus argumentos y, con `date` fijo, devuelve exactamente los mismos bytes
+(PDF "invariant": sin marcas de tiempo ni ID aleatorio). Única lectura de disco: las fuentes
+DejaVu Sans empaquetadas en `core/fonts/`, una vez al importar (AGENTS.md §3).
+
+Las figuras (esquema, deformada, diagramas N-V-M-σ) se dibujan en vectores con
+`reportlab.graphics` a partir de `Model`/`Results`: el core no depende de Plotly ni de un
+navegador para exportar imágenes.
 """
 
 from __future__ import annotations
@@ -16,15 +22,23 @@ from __future__ import annotations
 import datetime as dt
 import io
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 from xml.sax.saxutils import escape
 
+import numpy as np
+from reportlab.graphics.shapes import Circle, Drawing, Line, Polygon, PolyLine, Rect, String
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.fonts import addMapping
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.pdfbase.ttfonts import TTFError, TTFont
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
     BaseDocTemplate,
@@ -39,8 +53,8 @@ from reportlab.platypus import (
 )
 
 from core.materials import Material, Section
-from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model
-from core.solver import Results
+from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model, SupportType
+from core.solver import MemberResult, Results
 from core.verification import SafetyCheck, Status
 
 __all__ = ["build_pdf_report"]
@@ -81,7 +95,29 @@ PAGE_W, PAGE_H = A4
 MARGIN_X, MARGIN_TOP, MARGIN_BOT = 20 * mm, 24 * mm, 20 * mm
 CONTENT_W = PAGE_W - 2 * MARGIN_X
 
-_FONT, _BOLD = "Helvetica", "Helvetica-Bold"
+# --------------------------------------------------------------------------- #
+# Tipografía: DejaVu Sans embebida (subset). Cubre σ δ Σ · ⁴ → y se ve igual en cualquier
+# visor. Si faltaran los .ttf, cae a Helvetica + Symbol (estándar PDF, sin embeber).
+# --------------------------------------------------------------------------- #
+
+_FONT_DIR = Path(__file__).with_name("fonts")
+
+
+def _register_fonts() -> tuple[str, str, bool]:
+    try:
+        pdfmetrics.registerFont(TTFont("DejaVuSans", str(_FONT_DIR / "DejaVuSans.ttf")))
+        pdfmetrics.registerFont(TTFont("DejaVuSans-Bold", str(_FONT_DIR / "DejaVuSans-Bold.ttf")))
+    except (OSError, TTFError):
+        return "Helvetica", "Helvetica-Bold", False
+    # <b> en Paragraph -> DejaVuSans-Bold (sin itálica embebida: se usa la recta)
+    addMapping("DejaVuSans", 0, 0, "DejaVuSans")
+    addMapping("DejaVuSans", 1, 0, "DejaVuSans-Bold")
+    addMapping("DejaVuSans", 0, 1, "DejaVuSans")
+    addMapping("DejaVuSans", 1, 1, "DejaVuSans-Bold")
+    return "DejaVuSans", "DejaVuSans-Bold", True
+
+
+_FONT, _BOLD, _UNICODE = _register_fonts()
 
 STYLES: dict[str, ParagraphStyle] = {
     "title": ParagraphStyle("title", fontName=_BOLD, fontSize=17, leading=21, textColor=ACCENT, spaceAfter=2),
@@ -100,6 +136,8 @@ STYLES: dict[str, ParagraphStyle] = {
                               alignment=TA_RIGHT),
     "meta_k": ParagraphStyle("meta_k", fontName=_BOLD, fontSize=8, leading=10, textColor=MUTED),
     "meta_v": ParagraphStyle("meta_v", fontName=_FONT, fontSize=9, leading=11, textColor=INK),
+    "caption": ParagraphStyle("caption", fontName=_FONT, fontSize=7.8, leading=10, textColor=MUTED,
+                              alignment=TA_CENTER, spaceBefore=1, spaceAfter=4),
 }
 
 
@@ -117,6 +155,7 @@ def build_pdf_report(
     *,
     date: dt.date | None = None,
     reference_length: float | None = None,
+    include_figures: bool = True,
 ) -> bytes:
     """Genera la memoria de cálculo y devuelve el PDF como bytes (empieza con b"%PDF").
 
@@ -126,6 +165,7 @@ def build_pdf_report(
         date: fecha del cálculo (por defecto, hoy). Fijarla hace la salida reproducible.
         reference_length: longitud de referencia para la flecha relativa L/δ [mm]
             (por defecto, la extensión horizontal de la estructura).
+        include_figures: agrega esquema de cargas, deformada y diagramas N-V-M-σ (vectoriales).
     """
     date = date or dt.date.today()
     title = project_title.strip() or "Memoria de Cálculo"
@@ -134,11 +174,12 @@ def build_pdf_report(
 
     buf = io.BytesIO()
     doc = _Doc(buf, title=title, author=author or APP_NAME, date=date)
+    figs = _Figures() if include_figures else None
     story: list[Flowable] = []
-    story += _title_block(model, title, author, date)
+    story += _title_block(model, check, title, author, date)
     story += _section_basis(check)
-    story += _section_inputs(model)
-    story += _section_results(model, results, L_ref)
+    story += _section_inputs(model, figs)
+    story += _section_results(model, results, L_ref, figs)
     story += _section_verification(check)
     story += _section_limitations()
     doc.build(story, canvasmaker=_NumberedCanvas)
@@ -169,10 +210,11 @@ class _Doc(BaseDocTemplate):
         top = PAGE_H - 13 * mm
         canv.setFont(_BOLD, 7.5)
         canv.setFillColor(ACCENT)
-        canv.drawString(MARGIN_X, top, "MEMORIA DE CÁLCULO ESTRUCTURAL")
-        canv.setFont(_FONT, 7.5)
-        canv.setFillColor(MUTED)
-        canv.drawRightString(PAGE_W - MARGIN_X, top, _clip(self.report_title, 70))
+        canv.drawString(MARGIN_X, top, APP_NAME.upper())
+        if doc.page > 1:  # en la pág. 1 el título ya está en grande: no repetirlo
+            canv.setFont(_FONT, 7.5)
+            canv.setFillColor(MUTED)
+            canv.drawRightString(PAGE_W - MARGIN_X, top, _clip(self.report_title, 80))
         canv.setStrokeColor(ACCENT)
         canv.setLineWidth(0.8)
         canv.line(MARGIN_X, top - 2.5 * mm, PAGE_W - MARGIN_X, top - 2.5 * mm)
@@ -181,7 +223,7 @@ class _Doc(BaseDocTemplate):
         canv.setLineWidth(0.4)
         canv.line(MARGIN_X, bottom + 4 * mm, PAGE_W - MARGIN_X, bottom + 4 * mm)
         canv.drawString(MARGIN_X, bottom,
-                        f"{APP_NAME} · cálculo elástico lineal 2D · {self.report_date:%d/%m/%Y}")
+                        f"Cálculo elástico lineal 2D · Euler-Bernoulli · {self.report_date:%d/%m/%Y}")
         canv.restoreState()
 
 
@@ -214,14 +256,15 @@ class _NumberedCanvas(Canvas):
 # --------------------------------------------------------------------------- #
 
 
-def _title_block(model: Model, title: str, author: str, date: dt.date) -> list[Flowable]:
+def _title_block(model: Model, check: SafetyCheck, title: str, author: str, date: dt.date
+                 ) -> list[Flowable]:
     kind = "Viga recta" if model.is_horizontal_beam() else "Pórtico plano"
     meta = [
-        ("PROYECTO", escape(title)),
         ("AUTOR", escape(author) or "—"),
         ("FECHA", f"{date:%d/%m/%Y}"),
         ("ESTRUCTURA", f"{kind} · {len(model.nodes)} nodos · {len(model.members)} barras"),
         ("MÉTODO", "Rigidez directa · Euler-Bernoulli"),
+        ("CRITERIO", f"{_g('s')} elástica · FS ≥ {check.fs_min:g}"),
         ("SOFTWARE", APP_NAME),
     ]
     cells = [[_p(k, "meta_k"), _p(v, "meta_v")] for k, v in meta]
@@ -237,9 +280,13 @@ def _title_block(model: Model, title: str, author: str, date: dt.date) -> list[F
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
+    # El subtítulo nombra el tipo de documento sólo si el título no lo hace ya
+    is_memo = "memoria de c" in title.casefold()
+    subtitle = ("Predimensionamiento estructural 2D · análisis elástico lineal" if is_memo
+                else "Memoria de cálculo · predimensionamiento estructural 2D")
     return [
         _p(escape(title), "title"),
-        _p("Memoria de cálculo — predimensionamiento estructural 2D", "subtitle"),
+        _p(subtitle, "subtitle"),
         Spacer(1, 5 * mm),
         t,
         Spacer(1, 2 * mm),
@@ -262,7 +309,7 @@ def _section_basis(check: SafetyCheck) -> list[Flowable]:
     return [_h1("1. Bases de cálculo"), *(_bullet(t) for t in items)]
 
 
-def _section_inputs(model: Model) -> list[Flowable]:
+def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
     out: list[Flowable] = [_h1("2. Datos de entrada")]
 
     # 2.1 Geometría
@@ -335,11 +382,18 @@ def _section_inputs(model: Model) -> list[Flowable]:
              f"{s.c_max:g}", f"{s.A * 1e-6 * mat.rho:.2f}"] for s, mat in secs.values()]
     out.append(_table(["Sección", "h [mm]", f"A [cm{_sup(2)}]", f"I [cm{_sup(4)}]", f"W [cm{_sup(3)}]",
                        "c<sub>máx</sub> [mm]", "Masa [kg/m]"],
-                      rows, [0.28, 0.10, 0.12, 0.14, 0.12, 0.12, 0.12], num_cols={1, 2, 3, 4, 5, 6}))
+                      rows, [0.24, 0.10, 0.12, 0.14, 0.12, 0.14, 0.14], num_cols={1, 2, 3, 4, 5, 6}))
+
+    # 2.5 Esquema
+    if figs is not None:
+        out.append(figs.add(_fig_structure(model, CONTENT_W),
+                            "Esquema estático: apoyos, cargas de usuario y numeración de nodos. "
+                            "Cotas en m.", heading=_h2("2.5 Esquema estático y cargas")))
     return out
 
 
-def _section_results(model: Model, results: Results, L_ref: float) -> list[Flowable]:
+def _section_results(model: Model, results: Results, L_ref: float, figs: _Figures | None
+                     ) -> list[Flowable]:
     out: list[Flowable] = []
 
     # 3.1 Reacciones + equilibrio global
@@ -375,6 +429,8 @@ def _section_results(model: Model, results: Results, L_ref: float) -> list[Flowa
                [0.30, 0.17, 0.12, 0.11, 0.30], num_cols={1}),
         _p("Valor con signo del máximo en valor absoluto de toda la estructura.", "note"),
     ]))
+    if figs is not None:
+        out += _diagram_figures(model, results, figs)
 
     # 3.3 Deformación
     d = results.extreme("deflection")
@@ -386,6 +442,10 @@ def _section_results(model: Model, results: Results, L_ref: float) -> list[Flowa
         [f"Flecha relativa L/{_g('d')}", f"<b>{rel}</b>"],
     ]
     out.append(KeepTogether([_h2("3.3 Deformación"), _kv_table(rows)]))
+    if figs is not None:
+        drawing, k = _fig_deformed(model, results, CONTENT_W)
+        out.append(figs.add(drawing, f"Deformada amplificada ×{k:g} (en gris, la geometría sin deformar). "
+                                     f"{_g('d')}<sub>máx</sub> = {abs(d.value):,.2f} mm."))
     return out
 
 
@@ -446,10 +506,10 @@ class _LoadGroup:
     q1: float
 
 
-def _group_distributed(model: Model) -> list[_LoadGroup]:
-    """Une tramos contiguos de una misma carga (el builder la parte en barras) para listarla una vez."""
+def _chain_loads(model: Model, loads: Sequence[DistributedLoad]) -> list[list[DistributedLoad]]:
+    """Une tramos contiguos de una misma carga (el builder la parte en barras)."""
     groups: list[list[DistributedLoad]] = []
-    for d in sorted(model.distributed_loads, key=lambda d: (d.label, d.direction.value, d.member)):
+    for d in sorted(loads, key=lambda d: (d.label, d.direction.value, d.member)):
         if groups:
             p = groups[-1][-1]
             sp = (p.q_end - p.q_start) / model.member_length(p.member)
@@ -461,8 +521,13 @@ def _group_distributed(model: Model) -> list[_LoadGroup]:
                 groups[-1].append(d)
                 continue
         groups.append([d])
+    return groups
+
+
+def _group_distributed(model: Model) -> list[_LoadGroup]:
+    """Cargas distribuidas agrupadas para listarlas una vez por tramo continuo."""
     out = []
-    for g in groups:
+    for g in _chain_loads(model, model.distributed_loads):
         first, last = model.members[g[0].member], model.members[g[-1].member]
         ids = f"{g[0].member}" if len(g) == 1 else f"{g[0].member}–{g[-1].member}"
         out.append(_LoadGroup(
@@ -493,6 +558,485 @@ def _horizontal_extent(model: Model) -> float:
 
 
 # --------------------------------------------------------------------------- #
+# Figuras vectoriales (reportlab.graphics). Coordenadas de dibujo en puntos (pt),
+# origen abajo-izquierda, Y hacia arriba: misma orientación que los ejes globales.
+# --------------------------------------------------------------------------- #
+
+C_MEMBER = colors.HexColor("#2B3440")
+C_GHOST = colors.HexColor("#B8C0CA")
+C_SUPPORT = colors.HexColor("#5B6573")
+C_LOAD = colors.HexColor("#C2410C")
+C_LOAD_Q = colors.HexColor("#EA580C")
+C_DEFORMED = colors.HexColor("#2563EB")
+C_DIM = colors.HexColor("#7B8794")
+C_DIAG = {"M": colors.HexColor("#7C3AED"), "V": colors.HexColor("#0891B2"),
+          "N": colors.HexColor("#16A34A"), "sigma": colors.HexColor("#DC2626")}
+
+# magnitud -> (título, unidad, factor de impresión)
+_DIAG_SPEC: dict[str, tuple[str, str, float]] = {
+    "M": ("Momento flector M", "kN·m", _KNM),
+    "V": ("Esfuerzo de corte V", "kN", _KN),
+    "N": ("Esfuerzo normal N", "kN", _KN),
+    "sigma": ("Tensión normal máxima |σ|", "MPa", 1.0),
+}
+
+Pt = tuple[float, float]
+
+
+class _Figures:
+    """Numera las figuras y arma dibujo + epígrafe."""
+
+    def __init__(self) -> None:
+        self.n = 0
+
+    def caption(self, text: str) -> Paragraph:
+        self.n += 1
+        return _p(f"<b>Figura {self.n}.</b> {text}", "caption")
+
+    def add(self, drawing: Drawing, text: str, heading: Flowable | None = None) -> Flowable:
+        head = [heading] if heading is not None else []
+        return KeepTogether([*head, Spacer(1, 1.5 * mm), drawing, self.caption(text)])
+
+
+@dataclass(frozen=True, slots=True)
+class _View:
+    """Transformación mundo [mm] -> dibujo [pt] con escala uniforme."""
+
+    s: float
+    ox: float
+    oy: float
+
+    def __call__(self, x: float, y: float) -> Pt:
+        return x * self.s + self.ox, y * self.s + self.oy
+
+
+def _fit(pts: Sequence[Pt], w: float, h: float, pad: tuple[float, float, float, float]) -> _View:
+    """Encaja `pts` en w×h dejando pad = (izq, der, abajo, arriba) [pt], centrado."""
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    iw, ih = w - pad[0] - pad[1], h - pad[2] - pad[3]
+    s = min(iw / (x1 - x0) if x1 > x0 else math.inf, ih / (y1 - y0) if y1 > y0 else math.inf)
+    s = 1.0 if math.isinf(s) else s
+    return _View(s, pad[0] + (iw - (x1 - x0) * s) / 2 - x0 * s, pad[2] + (ih - (y1 - y0) * s) / 2 - y0 * s)
+
+
+def _auto_height(model: Model, w: float, pad: tuple[float, float, float, float],
+                 h_min: float, h_max: float, extra: Sequence[Pt] = ()) -> float:
+    """Alto del dibujo que respeta la proporción de la geometría, acotado a [h_min, h_max]."""
+    pts = list(model.nodes) + list(extra)
+    dx = max(p[0] for p in pts) - min(p[0] for p in pts)
+    dy = max(p[1] for p in pts) - min(p[1] for p in pts)
+    iw = w - pad[0] - pad[1]
+    ih = iw * dy / dx if dx > 0 else h_max
+    return float(min(max(ih + pad[2] + pad[3], h_min), h_max))
+
+
+def _tint(c: colors.Color, a: float) -> colors.Color:
+    """Color aclarado hacia blanco (relleno opaco: evita transparencias en el PDF)."""
+    return colors.Color(1 - a * (1 - c.red), 1 - a * (1 - c.green), 1 - a * (1 - c.blue))
+
+
+def _line(d: Drawing, a: Pt, b: Pt, color: colors.Color, width: float = 1.0,
+          dash: Sequence[float] = ()) -> None:
+    d.add(Line(a[0], a[1], b[0], b[1], strokeColor=color, strokeWidth=width,
+               strokeDashArray=dash or None, strokeLineCap=1))  # type: ignore[arg-type]
+
+
+def _poly(d: Drawing, pts: Sequence[Pt], color: colors.Color, width: float = 1.0) -> None:
+    d.add(PolyLine([c for p in pts for c in p], strokeColor=color, strokeWidth=width,
+                   strokeLineJoin=1, strokeLineCap=1))
+
+
+def _arrow(d: Drawing, tail: Pt, head: Pt, color: colors.Color, width: float = 1.0,
+           head_len: float = 5.0) -> None:
+    dx, dy = head[0] - tail[0], head[1] - tail[1]
+    L = math.hypot(dx, dy)
+    if L < 1e-6:
+        return
+    ux, uy = dx / L, dy / L
+    hl = min(head_len, 0.6 * L)
+    hw = 0.42 * hl
+    bx, by = head[0] - ux * hl, head[1] - uy * hl
+    _line(d, tail, (bx, by), color, width)
+    d.add(Polygon([head[0], head[1], bx - uy * hw, by + ux * hw, bx + uy * hw, by - ux * hw],
+                  fillColor=color, strokeColor=color, strokeWidth=0.3))
+
+
+_Anchor = Literal["start", "middle", "end"]
+
+
+def _label(d: Drawing, x: float, y: float, text: str, size: float = 7.0, color: colors.Color = INK,
+           anchor: _Anchor = "middle", bold: bool = False, halo: bool = True) -> None:
+    """Texto con fondo blanco para que no lo tapen líneas. (x, y) = línea base."""
+    font = _BOLD if bold else _FONT
+    if halo:
+        tw = stringWidth(text, font, size)
+        lx = {"start": x, "middle": x - tw / 2, "end": x - tw}[anchor]
+        d.add(Rect(lx - 1.2, y - 0.22 * size - 0.6, tw + 2.4, 0.95 * size + 1.2,
+                   fillColor=colors.white, strokeColor=None))  # type: ignore[arg-type]  # stub incompleto
+    d.add(String(x, y, text, fontName=font, fontSize=size, fillColor=color, textAnchor=anchor))
+
+
+def _short(v: float) -> str:
+    """Número compacto para rótulos de figura."""
+    a = abs(v)
+    if a < 5e-10:
+        return "0"
+    return f"{v:,.0f}" if a >= 100 else f"{v:.1f}" if a >= 10 else f"{v:.2f}"
+
+
+def _member_dir(model: Model, node: int) -> Pt:
+    """Dirección unitaria de la primera barra conectada, saliendo del nodo."""
+    for m, mem in enumerate(model.members):
+        if node in (mem.i, mem.j):
+            c, s = model.member_cos_sin(m)
+            return (c, s) if mem.i == node else (-c, -s)
+    return 1.0, 0.0
+
+
+def _draw_members(d: Drawing, model: Model, view: _View, color: colors.Color = C_MEMBER,
+                  width: float = 2.2) -> None:
+    for mem in model.members:
+        _line(d, view(*model.nodes[mem.i]), view(*model.nodes[mem.j]), color, width)
+
+
+def _draw_support(d: Drawing, p: Pt, kind: SupportType, direction: Pt, u: float = 7.5) -> None:
+    if kind is SupportType.FIXED:
+        dx, dy = direction
+        px, py = -dy, dx  # muro perpendicular a la barra, del lado opuesto a ella
+        _line(d, (p[0] + px * u, p[1] + py * u), (p[0] - px * u, p[1] - py * u), C_SUPPORT, 1.8)
+        for t in np.linspace(-1.0, 1.0, 6):
+            b = (p[0] + px * u * float(t), p[1] + py * u * float(t))
+            _line(d, b, (b[0] - dx * 0.55 * u - px * 0.35 * u, b[1] - dy * 0.55 * u - py * 0.35 * u),
+                  C_SUPPORT, 0.6)
+        return
+    base = p[1] - 1.1 * u
+    d.add(Polygon([p[0], p[1], p[0] - 0.7 * u, base, p[0] + 0.7 * u, base],
+                  fillColor=_tint(C_SUPPORT, 0.18), strokeColor=C_SUPPORT, strokeWidth=0.9))
+    if kind is SupportType.ROLLER:
+        for sx in (-0.35, 0.35):
+            d.add(Circle(p[0] + sx * u, base - 1.9, 1.6, fillColor=colors.white,
+                         strokeColor=C_SUPPORT, strokeWidth=0.7))
+        base -= 3.8
+    _line(d, (p[0] - u, base), (p[0] + u, base), C_SUPPORT, 1.0)
+    for t in np.linspace(-0.9, 0.9, 6):
+        x = p[0] + float(t) * u
+        _line(d, (x, base), (x - 0.3 * u, base - 0.3 * u), C_SUPPORT, 0.6)
+
+
+def _draw_supports(d: Drawing, model: Model, view: _View) -> None:
+    for sup in model.supports:
+        _draw_support(d, view(*model.nodes[sup.node]), sup.type, _member_dir(model, sup.node))
+
+
+def _load_dir(model: Model, dl: DistributedLoad) -> Pt:
+    """Dirección unitaria global de la carga para q > 0."""
+    c, s = model.member_cos_sin(dl.member)
+    return {LoadDirection.GLOBAL_Y: (0.0, 1.0), LoadDirection.GLOBAL_X: (1.0, 0.0),
+            LoadDirection.LOCAL_Y: (-s, c)}[dl.direction]
+
+
+def _user_dist_loads(model: Model) -> list[DistributedLoad]:
+    """Cargas distribuidas de usuario sumadas por (barra, dirección); sin peso propio."""
+    acc: dict[tuple[int, LoadDirection], list[float]] = {}
+    for dl in model.distributed_loads:
+        if dl.label == SELF_WEIGHT:
+            continue
+        a = acc.setdefault((dl.member, dl.direction), [0.0, 0.0])
+        a[0] += dl.q_start
+        a[1] += dl.q_end
+    return [DistributedLoad(m, q1, q2, direction) for (m, direction), (q1, q2) in acc.items() if q1 or q2]
+
+
+def _draw_dist_loads(d: Drawing, model: Model, view: _View, H: float = 20.0) -> None:
+    loads = _user_dist_loads(model)
+    if not loads:
+        return
+    qmax = max(max(abs(dl.q_start), abs(dl.q_end)) for dl in loads)
+    busy = [view(*model.nodes[p.node]) for p in model.nodal_loads]  # zonas con rótulo de carga puntual
+    for chain in _chain_loads(model, loads):
+        outline: list[Pt] = []
+        for dl in chain:
+            mem = model.members[dl.member]
+            a, b = view(*model.nodes[mem.i]), view(*model.nodes[mem.j])
+            gx, gy = _load_dir(model, dl)
+            n = max(2, round(math.hypot(b[0] - a[0], b[1] - a[1]) / 24.0) + 1)
+            for k in range(n):
+                t = k / (n - 1)
+                q = dl.q_start + (dl.q_end - dl.q_start) * t
+                head = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+                h = H * q / qmax
+                tail = (head[0] - gx * h, head[1] - gy * h)
+                outline.append(tail)
+                if abs(q) > 0.03 * qmax:
+                    gap = math.copysign(1.2, q)  # la punta no tapa la barra
+                    _arrow(d, tail, (head[0] - gx * gap, head[1] - gy * gap), C_LOAD_Q, 0.7, 3.6)
+        _poly(d, outline, C_LOAD_Q, 0.9)
+        q1, q2 = chain[0].q_start, chain[-1].q_end
+        uniform = all(math.isclose(c.q_start, c.q_end) for c in chain) and math.isclose(q1, q2)
+        text = f"q = {abs(q1):.3g} kN/m" if uniform else f"q = {abs(q1):.3g} {_TO} {abs(q2):.3g} kN/m"
+        gx, gy = _load_dir(model, chain[0])
+        sgn = 1.0 if (q1 + q2) >= 0 else -1.0
+        # Rótulo en el punto del contorno más alejado de las cargas puntuales (evita superposición)
+        n_o = len(outline)
+        cands = [outline[min(n_o - 1, round(f * (n_o - 1)))] for f in (0.5, 0.3, 0.7, 0.15, 0.85)]
+        mx, my = next((c for c in cands if all(abs(c[0] - b[0]) > 45.0 for b in busy)), cands[0])
+        ox, oy = -gx * sgn * 6.0, -gy * sgn * 6.0
+        if abs(gy) >= abs(gx):
+            _label(d, mx, my + oy + (0.0 if oy > 0 else -7.0), text, 7.2, C_LOAD)
+        else:
+            _label(d, mx + ox, my - 2.5, text, 7.2, C_LOAD, anchor="end" if ox < 0 else "start")
+
+
+def _draw_nodal_loads(d: Drawing, model: Model, view: _View, L: float = 26.0) -> None:
+    for p in model.nodal_loads:
+        x, y = view(*model.nodes[p.node])
+        F = math.hypot(p.Fx, p.Fy)
+        if F > 0:
+            ux, uy = p.Fx / F, p.Fy / F
+            tail = (x - ux * L, y - uy * L)
+            _arrow(d, tail, (x - ux * 1.2, y - uy * 1.2), C_LOAD, 1.5, 6.5)
+            text = f"{_short(F * _KN)} kN"
+            if abs(uy) >= abs(ux):
+                _label(d, tail[0], tail[1] + (3.0 if uy < 0 else -9.0), text, 7.2, C_LOAD)
+            else:
+                _label(d, tail[0] - math.copysign(3.0, ux), tail[1] - 2.5, text, 7.2, C_LOAD,
+                       anchor="end" if ux > 0 else "start")
+        if p.Mz:
+            r = 10.0
+            a0, a1 = (-0.25 * math.pi, 1.25 * math.pi) if p.Mz > 0 else (1.25 * math.pi, -0.25 * math.pi)
+            arc = [(x + r * math.cos(t), y + r * math.sin(t)) for t in np.linspace(a0, a1, 32)]
+            _poly(d, arc[:-2], C_LOAD, 1.3)
+            _arrow(d, arc[-4], arc[-1], C_LOAD, 1.3, 5.0)
+            _label(d, x - 3.0, y - r - 9.0, f"{_short(abs(p.Mz) * _KNM)} kN·m", 7.2, C_LOAD, anchor="end")
+
+
+def _draw_node_numbers(d: Drawing, model: Model, view: _View) -> None:
+    for k, (x, y) in enumerate(model.nodes):
+        px, py = view(x, y)
+        _label(d, px + 7.0, py - 11.0, str(k), 6.2, MUTED, anchor="start", halo=False)
+
+
+def _draw_dim(d: Drawing, a: Pt, b: Pt, text: str, horizontal: bool) -> None:
+    """Cota entre a y b (ya ubicados en la línea de cota)."""
+    _line(d, a, b, C_DIM, 0.6)
+    t = 3.0
+    for p in (a, b):
+        if horizontal:
+            _line(d, (p[0], p[1] - t), (p[0], p[1] + t), C_DIM, 0.6)
+        else:
+            _line(d, (p[0] - t, p[1]), (p[0] + t, p[1]), C_DIM, 0.6)
+    mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+    if horizontal:
+        _label(d, mx, my + 2.5, text, 6.8, C_DIM)
+    else:
+        _label(d, mx + 4.0, my - 2.5, text, 6.8, C_DIM, anchor="start")
+
+
+def _draw_dimensions(d: Drawing, model: Model, view: _View, below: float) -> None:
+    xs = sorted({round(x, 6) for x, _ in model.nodes})
+    y_min = min(y for _, y in model.nodes)
+    yd = view(0.0, y_min)[1] - below
+    if model.is_horizontal_beam():
+        last_label = -1e9
+        for xa, xb in zip(xs, xs[1:], strict=False):
+            pa, pb = view(xa, y_min), view(xb, y_min)
+            text = f"{(xb - xa) * _M:.2f}"
+            fits = (pb[0] - pa[0]) > stringWidth(text, _FONT, 6.8) + 4 and pa[0] > last_label
+            _draw_dim(d, (pa[0], yd), (pb[0], yd), text if fits else "", True)
+            if fits:
+                last_label = (pa[0] + pb[0]) / 2
+        if len(xs) > 2:
+            pa, pb = view(xs[0], y_min), view(xs[-1], y_min)
+            _draw_dim(d, (pa[0], yd - 13), (pb[0], yd - 13), f"L = {(xs[-1] - xs[0]) * _M:.2f} m", True)
+        return
+    pa, pb = view(xs[0], y_min), view(xs[-1], y_min)
+    _draw_dim(d, (pa[0], yd), (pb[0], yd), f"{(xs[-1] - xs[0]) * _M:.2f} m", True)
+    y_max = max(y for _, y in model.nodes)
+    x_r = view(xs[-1], 0.0)[0] + 22.0
+    _draw_dim(d, (x_r, view(0.0, y_min)[1]), (x_r, view(0.0, y_max)[1]), f"{(y_max - y_min) * _M:.2f} m",
+              False)
+
+
+def _fig_structure(model: Model, w: float) -> Drawing:
+    beam = model.is_horizontal_beam()
+    pad = (34.0, 34.0, 62.0, 44.0) if beam else (64.0, 70.0, 56.0, 46.0)
+    h = 140.0 if beam else _auto_height(model, w, pad, 200.0, 290.0)
+    d = Drawing(w, h)
+    view = _fit(model.nodes, w, h, pad)
+    _draw_members(d, model, view)
+    _draw_supports(d, model, view)
+    _draw_dist_loads(d, model, view)
+    _draw_nodal_loads(d, model, view)
+    _draw_node_numbers(d, model, view)
+    _draw_dimensions(d, model, view, below=34.0 if beam else 30.0)
+    if any(dl.label == SELF_WEIGHT for dl in model.distributed_loads):
+        _label(d, 2.0, 3.0, "+ peso propio (incluido en el cálculo, no dibujado)", 6.5, MUTED,
+               anchor="start", halo=False)
+    return d
+
+
+def _nice(v: float) -> float:
+    """Redondea hacia abajo a 1-2-5 × 10ⁿ (escala legible)."""
+    if v <= 0:
+        return 1.0
+    e = 10.0 ** math.floor(math.log10(v))
+    m = v / e
+    return (5.0 if m >= 5 else 2.0 if m >= 2 else 1.0) * e
+
+
+def _fig_deformed(model: Model, results: Results, w: float) -> tuple[Drawing, float]:
+    """Deformada amplificada; devuelve (dibujo, factor de amplificación)."""
+    xs = [x for x, _ in model.nodes]
+    ys = [y for _, y in model.nodes]
+    ext = max(max(xs) - min(xs), max(ys) - min(ys), 1.0)
+    dmax = max(float(mr.deflection.max()) for mr in results.members)
+    k = _nice(0.10 * ext / dmax) if dmax > 0 else 1.0
+    deformed = [mr.points + k * mr.displacement for mr in results.members]
+    pts: list[Pt] = list(model.nodes) + [(float(p[0]), float(p[1])) for arr in deformed for p in arr]
+    beam = model.is_horizontal_beam()
+    pad = (24.0, 24.0, 22.0, 18.0)
+    h = _auto_height(model, w, pad, 70.0, 150.0, extra=pts) if beam else \
+        _auto_height(model, w, pad, 190.0, 280.0, extra=pts)
+    d = Drawing(w, h)
+    view = _fit(pts, w, h, pad)
+    _draw_members(d, model, view, C_GHOST, 1.2)
+    _draw_supports(d, model, view)
+    for arr in deformed:
+        _poly(d, [view(float(p[0]), float(p[1])) for p in arr], C_DEFORMED, 1.8)
+    e = results.extreme("deflection")
+    mr = results.members[e.member]
+    idx = int(np.argmin(np.abs(mr.x - e.x)))
+    px, py = view(*map(float, mr.points[idx] + k * mr.displacement[idx]))
+    d.add(Circle(px, py, 2.4, fillColor=C_DEFORMED, strokeColor=colors.white, strokeWidth=0.6))
+    below = mr.displacement[idx][1] < 0
+    text = f"{_gt('d')}máx = {abs(e.value):.2f} mm"
+    half = stringWidth(text, _BOLD, 7.2) / 2 + 2.0
+    _label(d, min(max(px, half), w - half), py + (-11.0 if below else 5.0), text, 7.2, C_DEFORMED,
+           bold=True)  # acotado al ancho del dibujo
+    return d, k
+
+
+def _values(mr: MemberResult, q: str) -> np.ndarray[Any, np.dtype[np.float64]]:
+    return {"M": mr.M, "V": mr.V, "N": mr.N, "sigma": mr.sigma_abs}[q]
+
+
+def _fig_beam_diagram(model: Model, results: Results, q: str, w: float, h: float = 96.0) -> Drawing:
+    """Diagrama cartesiano f(x) para vigas. M se dibuja del lado traccionado (+ hacia abajo)."""
+    f = _DIAG_SPEC[q][2]  # unidad y convención van en el epígrafe
+    color = C_DIAG[q]
+    x0 = min(x for x, _ in model.nodes)
+    xs = np.concatenate([mr.points[:, 0] for mr in results.members]) - x0
+    vs = np.concatenate([_values(mr, q) for mr in results.members]) * f
+    plot = -vs if q == "M" else vs
+    L = float(xs.max())
+    pl, pr, pb, pt = 30.0, 14.0, 22.0, 16.0
+    lo, hi = min(float(plot.min()), 0.0), max(float(plot.max()), 0.0)
+    span = hi - lo if hi - lo > 1e-12 else 1.0
+    sx, sy = (w - pl - pr) / L, (h - pb - pt) / span
+
+    def P(x: float, v: float) -> Pt:
+        return pl + x * sx, pb + (v - lo) * sy
+
+    d = Drawing(w, h)
+    for sup in model.supports:  # guías de apoyos
+        xa = P(model.nodes[sup.node][0] - x0, 0.0)[0]
+        _line(d, (xa, pb - 4), (xa, h - pt + 4), C_GHOST, 0.5, [1.5, 2])
+    poly = [P(0.0, 0.0)] + [P(float(x), float(v)) for x, v in zip(xs, plot, strict=True)] + [P(L, 0.0)]
+    d.add(Polygon([c for p in poly for c in p], fillColor=_tint(color, 0.16), strokeColor=None))
+    _poly(d, poly[1:-1], color, 1.5)
+    _line(d, P(0.0, 0.0), P(L, 0.0), C_MEMBER, 1.4)
+    # Eje x: posiciones de nodos [m]
+    last = -1e9
+    for x in sorted({round(float(x), 6) for x, _ in ((nx - x0, 0) for nx, _ in model.nodes)}):
+        px = P(x, 0.0)[0]
+        _line(d, (px, pb - 9), (px, pb - 6), C_DIM, 0.5)
+        if px - last > 24:
+            _label(d, px, pb - 17, f"{x * _M:.2f}", 6.3, C_DIM, halo=False)
+            last = px
+    # Extremos rotulados con su signo real
+    for k in sorted({int(np.argmax(vs)), int(np.argmin(vs))}):
+        if abs(vs[k]) < 1e-9 * max(float(np.abs(vs).max()), 1e-12):
+            continue
+        px, py = P(float(xs[k]), float(plot[k]))
+        up = plot[k] >= 0
+        d.add(Circle(px, py, 1.6, fillColor=color, strokeColor=None))
+        _label(d, px, py + (3.5 if up else -9.5), _short(float(vs[k])), 7.0, color, bold=True)
+    return d
+
+
+def _fig_frame_diagram(model: Model, results: Results, q: str, w: float) -> Drawing:
+    """Diagrama dibujado perpendicular a cada barra sobre la geometría (pórticos)."""
+    _, _, f = _DIAG_SPEC[q]
+    color = C_DIAG[q]
+    off_max = 22.0
+    pad = (off_max + 12.0,) * 4
+    h = _auto_height(model, w, pad, 120.0, 200.0)
+    d = Drawing(w, h)
+    view = _fit(model.nodes, w, h, pad)
+    vmax = max(float(np.abs(_values(mr, q)).max()) for mr in results.members) or 1.0
+    scale = off_max / vmax
+    _draw_members(d, model, view, C_MEMBER, 1.6)
+    labels: list[tuple[Pt, float]] = []
+    for mr in results.members:
+        c, s = model.member_cos_sin(mr.member)
+        ny = (-s, c)
+        v = _values(mr, q)
+        sgn = -1.0 if q == "M" else 1.0  # M del lado traccionado
+        base = [view(float(p[0]), float(p[1])) for p in mr.points]
+        off = [(bx + sgn * float(vi) * scale * ny[0], by + sgn * float(vi) * scale * ny[1])
+               for (bx, by), vi in zip(base, v, strict=True)]
+        ring = [base[0], *off, base[-1]]
+        d.add(Polygon([cc for p in ring for cc in p], fillColor=_tint(color, 0.18), strokeColor=None))
+        _poly(d, off, color, 1.3)
+        for k in sorted({0, len(v) - 1, int(np.argmax(np.abs(v)))}):
+            if abs(v[k]) > 0.03 * vmax:
+                labels.append((off[k], float(v[k]) * f))
+    _draw_supports(d, model, view)
+    placed: list[Pt] = []
+    for (x, y), val in labels:  # evita rótulos superpuestos en nudos compartidos
+        if any(math.hypot(x - a, y - b) < 14 for a, b in placed):
+            continue
+        placed.append((x, y))
+        _label(d, x, y - 2.5, _short(val), 6.8, color, bold=True)
+    return d
+
+
+def _diagram_figures(model: Model, results: Results, figs: _Figures) -> list[Flowable]:
+    out: list[Flowable] = []
+    beam = model.is_horizontal_beam()
+    shown: list[str] = []
+    for q in ("M", "V", "N", "sigma"):
+        vmax = max(float(np.abs(_values(mr, q)).max()) for mr in results.members) * _DIAG_SPEC[q][2]
+        if vmax < 5e-4:  # nulo a la precisión impresa (0.000 en las tablas)
+            label = _DIAG_SPEC[q][0]
+            out.append(_p(f"{label}: nulo en toda la estructura (no se grafica).", "note"))
+            continue
+        shown.append(q)
+
+    def cap(q: str) -> str:
+        title, unit, _ = _DIAG_SPEC[q]
+        title = (title[0].lower() + title[1:]).replace("σ", _g("s"))
+        extra = " Dibujado del lado traccionado." if q == "M" else ""
+        return f"Diagrama de {title} [{unit}].{extra}"
+
+    if beam:
+        for q in shown:
+            out.append(figs.add(_fig_beam_diagram(model, results, q, CONTENT_W), cap(q)))
+        return out
+    # Pórtico: grilla de 2 columnas
+    cw = CONTENT_W / 2
+    cells = [[_fig_frame_diagram(model, results, q, cw - 4), figs.caption(cap(q))] for q in shown]
+    rows = [cells[i:i + 2] + ([[""]] if len(cells[i:i + 2]) == 1 else []) for i in range(0, len(cells), 2)]
+    for row in rows:
+        t = Table([row], colWidths=[cw, cw])
+        t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                               ("RIGHTPADDING", (0, 0), (-1, -1), 2)]))
+        out.append(t)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Helpers de maquetación
 # --------------------------------------------------------------------------- #
 
@@ -501,12 +1045,20 @@ _GREEK = {"s": "σ", "d": "δ", "n": "ν", "r": "ρ"}
 
 
 def _g(letter: str) -> str:
-    """Letra griega en la fuente Symbol estándar (no requiere embeber TTF): 's' -> σ, 'd' -> δ."""
-    return f'<font face="Symbol">{_GREEK[letter]}</font>'
+    """Letra griega para Paragraph: 's' -> σ, 'd' -> δ (vía fuente Symbol si no hay DejaVu)."""
+    return _GREEK[letter] if _UNICODE else f'<font face="Symbol">{_GREEK[letter]}</font>'
+
+
+def _gt(letter: str) -> str:
+    """Letra griega para texto plano de figuras (sin markup)."""
+    return _GREEK[letter] if _UNICODE else {"s": "sigma", "d": "delta"}.get(letter, letter)
+
+
+_TO = "→" if _UNICODE else "->"
 
 
 def _sup(n: int) -> str:
-    """Exponente con markup (Helvetica estándar no trae ⁴; se usa <super> para todos)."""
+    """Exponente con markup <super> (uniforme para ², ³ y ⁴)."""
     return f"<super>{n}</super>"
 
 
