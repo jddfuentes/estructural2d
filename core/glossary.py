@@ -213,6 +213,12 @@ TERMS: tuple[Term, ...] = (
         "dibuja en el esquema.",
     ),
     Term(
+        "Centro de corte",
+        "Punto de la sección por el que debe pasar la carga transversal para que la barra "
+        "flexione sin torsión. Coincide con el baricentro en secciones doblemente simétricas; "
+        "en canales (UPN, C) queda del lado exterior del alma.",
+    ),
+    Term(
         "Fluencia",
         "Estado en que la tensión alcanza S_{y}. El veredicto FLUENCIA indica FS < 1; ALERTA, "
         "1 ≤ FS < FS_{adm}.",

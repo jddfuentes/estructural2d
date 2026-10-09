@@ -26,6 +26,25 @@ El núcleo trabaja exclusivamente en unidades SI-mm:
 La interfaz convierte y muestra m, kN, kN/m y kN·m. Esas conversiones no forman
 parte de las ecuaciones del núcleo.
 
+### Catálogo de perfiles
+
+Todas las secciones trabajan en flexión alrededor del eje fuerte x-x. Las notas y
+advertencias que muestran la app y la memoria salen de `core/materials.py`
+(`FAMILY_NOTES`, `family_warnings()`).
+
+| Familia | Fuente de A, I y c | Observaciones |
+| --- | --- | --- |
+| IPE | Tabla Euronorm 19-57 | Doble T laminado |
+| IPN | Tabla DIN 1025-1 | Doble T de alas inclinadas |
+| UPN | Tabla DIN 1026-1 / EN 10279 | Canal: centro de corte fuera del alma |
+| Perfil W | AISC Shapes Database v15.0 (ASTM A6), convertida a SI | h = altura real, no la nominal |
+| Perfil C (Conformado) | Geometría nominal, radio interior de plegado igual al espesor | Canal sin labios, propiedades brutas |
+| Tubos y caños | Geometría nominal (ASME B36.10 Sch 40; tubos con esquinas vivas) | — |
+
+En los perfiles C, el área y la inercia se integran en forma cerrada: alma y alas
+como rectángulos y las cuatro esquinas como cuartos de corona circular. La masa
+lineal de todas las familias es `7850 · A`.
+
 ## 2. Sistema de referencia y signos
 
 El sistema global es dextrógiro y plano:
@@ -226,6 +245,10 @@ Actualmente se supone:
 - cargas estáticas aplicadas en nodos o distribuidas linealmente sobre barras;
 - análisis de primer orden, sin efectos P-Delta;
 - flexión en un solo eje y sin torsión fuera del modelo plano;
+- en canales (UPN, C) la carga pasa por el centro de corte: si no, la torsión que
+  aparece no se calcula;
+- en chapa conformada en frío se usan propiedades brutas, sin ancho efectivo por
+  abolladura local;
 - propiedades nominales del catálogo, sin tolerancias de fabricación;
 - tensiones normales evaluadas en fibras extremas elásticas.
 
@@ -244,6 +267,7 @@ convención de signos y tolerancia. El estado de referencia del MVP es:
 | Voladizo | Reacciones, momento y flecha analíticos | Casos con `Fx` y momento nodal |
 | Pórtico plano | Casos analíticos básicos y equilibrio | Comparación independiente con software FEM |
 | Rigidez de sección | Catálogo y geometría nominal | Contrastar propiedades con proveedor |
+| Catálogo UPN / W / C | A, I, W y masa contra tablas DIN 1026-1 y AISC (< 1 %); C contra método lineal AISI | Contrastar perfiles C con catálogo de fabricante |
 | Seguridad | `FS = Sy / sigma_max` | Definir norma, combinaciones y criterio de diseño |
 | Peso propio | `q = -rho A g` | Revisar masas, unidades y ejes para perfiles reales |
 
@@ -262,5 +286,11 @@ convención de signos y tolerancia. El estado de referencia del MVP es:
 
 - **MVP actual:** método directo de rigidez 2D, elemento Euler-Bernoulli,
   postproceso N-V-M, deformada, tensión normal y verificación elástica.
+- **2026-10-09 · Catálogo UPN, W y C conformado:** se agregan 12 UPN (DIN 1026-1),
+  6 perfiles W (ASTM A6) y 6 perfiles C de chapa doblada sin labios (radio interior
+  igual al espesor). Notas y advertencias por familia (torsión en canales, abolladura
+  local en chapa delgada) centralizadas en `core/materials.py` y volcadas en la
+  memoria PDF. Sin cambios de signos ni unidades. Tests en
+  `tests/test_materials_verification.py` y `tests/test_reports.py`.
 - Las decisiones nuevas deben agregarse aquí indicando fecha, motivación, impacto
   en signos/unidades y tests de validación asociados.

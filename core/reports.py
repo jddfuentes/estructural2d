@@ -54,7 +54,7 @@ from reportlab.platypus import (
 )
 
 from core.glossary import GRAPHIC_SYMBOLS, NOTATION, TERMS
-from core.materials import Material, Section
+from core.materials import FAMILY_NOTES, Material, Section, family_warnings
 from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model, SupportType
 from core.solver import MemberResult, Results
 from core.verification import SafetyCheck, Status
@@ -185,7 +185,7 @@ def build_pdf_report(
     story += _section_inputs(model, figs)
     story += _section_results(model, results, L_ref, figs)
     story += _section_verification(check)
-    story += _section_limitations()
+    story += _section_limitations(model)
     if include_glossary:
         story += _section_glossary()
     doc.build(story, canvasmaker=_NumberedCanvas)
@@ -397,6 +397,9 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
     out.append(_table(["Sección", "h [mm]", f"A [cm{_sup(2)}]", f"I [cm{_sup(4)}]", f"W [cm{_sup(3)}]",
                        "c<sub>máx</sub> [mm]", "Masa [kg/m]"],
                       rows, [0.24, 0.10, 0.12, 0.14, 0.12, 0.14, 0.14], num_cols={1, 2, 3, 4, 5, 6}))
+    for fam in _families(model):
+        if fam in FAMILY_NOTES:
+            out.append(_p(f"<b>{escape(fam)}:</b> {escape(FAMILY_NOTES[fam])}", "note"))
 
     # 2.5 Esquema
     if figs is not None:
@@ -490,8 +493,14 @@ def _section_verification(check: SafetyCheck) -> list[Flowable]:
     return [KeepTogether([_h1("4. Verificación de seguridad"), _kv_table(rows), Spacer(1, 3 * mm), verdict])]
 
 
-def _section_limitations() -> list[Flowable]:
-    items = [
+def _families(model: Model) -> list[str]:
+    """Familias de sección usadas en el modelo, en orden de aparición y sin repetir."""
+    return list(dict.fromkeys(mem.section.family for mem in model.members))
+
+
+def _section_limitations(model: Model) -> list[Flowable]:
+    family_items = [w for fam in _families(model) for w in family_warnings(fam)]
+    items = [*dict.fromkeys(family_items),
         "No se verifican pandeo flexional, pandeo lateral-torsional, abolladura local, tensiones de "
         "corte ni combinadas (von Mises), fatiga ni efectos de segundo orden.",
         "Propiedades de sección nominales de catálogo; verificar contra el catálogo del proveedor.",
