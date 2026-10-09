@@ -71,3 +71,40 @@ def test_app_smoke(kind):
     labels = [m.label for m in at.metric]
     assert "σ máx" in labels and "δ máx" in labels
     assert "Descargar memoria" in [button.label for button in at.download_button]
+
+
+@pytest.mark.parametrize("kind", ["Viga", "Pórtico"])
+@pytest.mark.parametrize("family", ["UPN", "Perfil W", "Perfil C (Conformado)"])
+def test_app_new_profile_families(kind, family):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run()
+    if kind != "Viga":
+        at.sidebar.radio[0].set_value(kind).run()
+    at.sidebar.selectbox(key="beam_fam").set_value(family).run()
+
+    assert not at.exception, [e.message for e in at.exception]
+    assert any(metric.label == "σ máx" for metric in at.metric)
+
+
+@pytest.mark.parametrize("kind", ["Viga", "Pórtico"])
+@pytest.mark.parametrize("family,has_warning", [("UPN", True), ("IPE", False)])
+def test_app_profile_family_warning(kind, family, has_warning):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    from core.materials import family_warnings
+
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run()
+    if kind != "Viga":
+        at.sidebar.radio[0].set_value(kind).run()
+    at.sidebar.selectbox(key="beam_fam").set_value(family).run()
+
+    assert not at.exception, [e.message for e in at.exception]
+    rendered_warnings = [warning.value for warning in at.warning]
+    family_messages = family_warnings(family)
+    if has_warning:
+        assert any(message in rendered_warnings for message in family_messages)
+    else:
+        assert not any(message in rendered_warnings for message in family_messages)

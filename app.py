@@ -12,6 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from core.design import suggest_section
+from core.materials import family_warnings
 from core.model import Model
 from core.reports import build_pdf_report
 from core.solver import Results, StructuralError, solve
@@ -147,6 +148,8 @@ def _design_tab(inp: AppInputs) -> None:
         return
     s = sug.section
     c2.metric(s.name, f"{s.mass_per_m:.1f} kg/m", delta=f"FS = {sug.check.fs:.2f}", delta_color="off")
+    for warning in family_warnings(s.family):
+        st.warning(warning)
     if s.name == inp.section.name:
         st.success("El perfil seleccionado ya es el más liviano que verifica.")
     elif s.A < inp.section.A:
