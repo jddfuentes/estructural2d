@@ -156,6 +156,7 @@ def build_pdf_report(
     date: dt.date | None = None,
     reference_length: float | None = None,
     include_figures: bool = True,
+    include_glossary: bool = True,
 ) -> bytes:
     """Genera la memoria de cálculo y devuelve el PDF como bytes (empieza con b"%PDF").
 
@@ -166,6 +167,7 @@ def build_pdf_report(
         reference_length: longitud de referencia para la flecha relativa L/δ [mm]
             (por defecto, la extensión horizontal de la estructura).
         include_figures: agrega esquema de cargas, deformada y diagramas N-V-M-σ (vectoriales).
+        include_glossary: agrega la sección final "Glosario y simbología".
     """
     date = date or dt.date.today()
     title = project_title.strip() or "Memoria de Cálculo"
@@ -177,11 +179,13 @@ def build_pdf_report(
     figs = _Figures() if include_figures else None
     story: list[Flowable] = []
     story += _title_block(model, check, title, author, date)
-    story += _section_basis(check, figs)
+    story += _section_basis(check, figs, include_glossary)
     story += _section_inputs(model, figs)
     story += _section_results(model, results, L_ref, figs)
     story += _section_verification(check)
     story += _section_limitations()
+    if include_glossary:
+        story += _section_glossary()
     doc.build(story, canvasmaker=_NumberedCanvas)
     return buf.getvalue()
 
@@ -293,7 +297,7 @@ def _title_block(model: Model, check: SafetyCheck, title: str, author: str, date
     ]
 
 
-def _section_basis(check: SafetyCheck, figs: _Figures | None) -> list[Flowable]:
+def _section_basis(check: SafetyCheck, figs: _Figures | None, glossary: bool = False) -> list[Flowable]:
     items = [
         "Análisis elástico lineal de primer orden por el método directo de rigidez; elementos de "
         "pórtico plano Euler-Bernoulli (sin deformación por corte). Solicitaciones y elástica exactas "
@@ -306,6 +310,9 @@ def _section_basis(check: SafetyCheck, figs: _Figures | None) -> list[Flowable]:
         f"{_g('s')} = N/A ± M·c/I; FS = S<sub>y</sub> / {_g('s')}<sub>máx</sub> "
         f"≥ FS<sub>adm</sub> = {check.fs_min:g}.",
     ]
+    if glossary:
+        items.append("La notación, los símbolos gráficos y los términos usados se detallan en la "
+                     "sección 6 (Glosario y simbología).")
     out: list[Flowable] = [_h1("1. Bases de cálculo"), *(_bullet(t) for t in items)]
     if figs is not None:
         out.append(figs.add(_fig_conventions(CONTENT_W),
@@ -490,6 +497,206 @@ def _section_limitations() -> list[Flowable]:
         "(CIRSOC 301 / AISC 360) firmada por profesional matriculado.",
     ]
     return [_h1("5. Limitaciones y alcance"), *(_bullet(t, "note") for t in items)]
+
+
+# --------------------------------------------------------------------------- #
+# 6. Glosario y simbología
+# --------------------------------------------------------------------------- #
+
+
+def _notation() -> tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...]:
+    """(grupo, ((símbolo, descripción, unidad), ...)). Markup de Paragraph permitido."""
+    s, d, n, r = _g("s"), _g("d"), _g("n"), _g("r")
+    cmax, sub_adm, smax = "c<sub>máx</sub>", "FS<sub>adm</sub>", f"{s}<sub>máx</sub>"
+    return (
+        ("Ejes y geometría", (
+            ("X, Y", "Ejes globales: X hacia la derecha, Y hacia arriba.", "—"),
+            ("x', y'", "Ejes locales de barra: x' del nodo i al nodo j; y' = x' girado +90°.", "—"),
+            ("i, j", "Nodo inicial y nodo final de una barra.", "—"),
+            ("L", "Longitud de barra; en L/" + d + ", longitud de referencia (luz).", "m"),
+            ("h", "Altura total de la sección transversal.", "mm"),
+            (f"c, {cmax}", f"Distancia del eje neutro a la fibra extrema; {cmax} es la mayor de ambas.",
+             "mm"),
+        )),
+        ("Cargas y reacciones", (
+            ("Fx, Fy", "Fuerza concentrada en un nodo, en ejes globales (Fy &lt; 0: hacia abajo).", "kN"),
+            ("q", "Carga distribuida por unidad de longitud de barra (q &lt; 0: hacia abajo).", "kN/m"),
+            ("Mz", "Momento concentrado aplicado o reacción de momento; positivo antihorario.", "kN·m"),
+            ("Rx, Ry", "Reacciones de vínculo en ejes globales, actuando sobre la estructura.", "kN"),
+            ("Σ", "Sumatoria. Equilibrio global: ΣR + ΣF = 0.", "—"),
+        )),
+        ("Solicitaciones", (
+            ("N", "Esfuerzo normal; positivo de tracción.", "kN"),
+            ("V", "Esfuerzo de corte; V = dM/dx (par horario positivo sobre el elemento).", "kN"),
+            ("M", "Momento flector; positivo si tracciona la fibra inferior (y' negativa).", "kN·m"),
+        )),
+        ("Desplazamientos", (
+            ("ux, uy", "Desplazamientos nodales según X e Y.", "mm"),
+            ("θz", "Giro nodal alrededor de Z; positivo antihorario.", "rad"),
+            (f"{d}, {d}<sub>máx</sub>",
+             "Desplazamiento total (módulo de ux y uy) y su máximo en la estructura.", "mm"),
+            (f"L/{d}", f"Flecha relativa: longitud de referencia dividida por {d}<sub>máx</sub>.", "—"),
+        )),
+        ("Sección y material", (
+            ("A", "Área de la sección transversal.", f"cm{_sup(2)}"),
+            ("I", "Momento de inercia respecto del eje de flexión.", f"cm{_sup(4)}"),
+            ("W", f"Módulo resistente elástico, W = I / {cmax}.", f"cm{_sup(3)}"),
+            ("E", "Módulo de elasticidad longitudinal.", "MPa"),
+            ("Sy, Su", "Tensión de fluencia y tensión de rotura del material.", "MPa"),
+            (n, "Coeficiente de Poisson.", "—"),
+            (r, "Densidad del material (define el peso propio).", f"kg/m{_sup(3)}"),
+        )),
+        ("Verificación", (
+            (f"{s}, |{s}|<sub>máx</sub>", f"Tensión normal en fibra extrema, {s} = N/A ± M·c/I, y su máximo "
+                                          "absoluto en la estructura.", "MPa"),
+            ("FS", f"Factor de seguridad a fluencia, FS = Sy / {smax}.", "—"),
+            (sub_adm, "Factor de seguridad mínimo exigido (admisible).", "—"),
+            ("Aprov.", f"Aprovechamiento = {smax} · {sub_adm} / Sy; más de 100 % no verifica.", "%"),
+            ("GDL", "Grado de libertad nodal (ux, uy, θz).", "—"),
+        )),
+    )
+
+
+_TERMS: tuple[tuple[str, str], ...] = (
+    ("Predimensionamiento", "Selección preliminar de perfiles con un modelo simplificado, previa al "
+                            "cálculo reglamentario definitivo."),
+    ("Método directo de rigidez", "Ensambla K·u = F con las matrices de rigidez de cada barra, resuelve los "
+                                  "desplazamientos nodales y de ellos obtiene reacciones y solicitaciones."),
+    ("Euler-Bernoulli", "Teoría de vigas que desprecia la deformación por corte: las secciones planas "
+                        "permanecen planas y normales al eje deformado."),
+    ("Lado traccionado", "Convención de dibujo del diagrama de M: la ordenada se traza del lado de la "
+                         "fibra traccionada de la barra."),
+    ("Deformada amplificada", "Geometría deformada con los desplazamientos multiplicados por un factor de "
+                              "escala para hacerlos visibles; los valores informados no se escalan."),
+    ("Peso propio", "Carga vertical distribuida igual a ρ·g·A del perfil. Se incluye en el cálculo y no se "
+                    "dibuja en el esquema."),
+    ("Fluencia", "Estado en que la tensión alcanza Sy. El veredicto FLUENCIA indica FS &lt; 1; ALERTA, "
+                 "1 ≤ FS &lt; FS<sub>adm</sub>."),
+)
+
+
+def _icon(kind: str, w: float = 54.0, h: float = 26.0) -> Drawing:
+    """Ícono de la simbología gráfica, dibujado con las mismas primitivas que las figuras."""
+    d = Drawing(w, h)
+    mid = w / 2
+    if kind in ("fixed", "pinned", "roller"):
+        y = h - 6.0 if kind != "fixed" else h / 2
+        x0 = 12.0 if kind == "fixed" else 6.0
+        _line(d, (x0, y), (w - 6.0, y), C_MEMBER, 2.0)
+        st = {"fixed": SupportType.FIXED, "pinned": SupportType.PINNED, "roller": SupportType.ROLLER}[kind]
+        _draw_support(d, (x0 if kind == "fixed" else mid, y), st, (1.0, 0.0), u=6.0)
+    elif kind == "point":
+        _line(d, (6.0, 5.0), (w - 6.0, 5.0), C_MEMBER, 2.0)
+        _arrow(d, (mid, h - 1.0), (mid, 6.2), C_LOAD, 1.4, 5.5)
+    elif kind == "dist":
+        _line(d, (6.0, 5.0), (w - 6.0, 5.0), C_MEMBER, 2.0)
+        xs = np.linspace(8.0, w - 8.0, 5)
+        for x in xs:
+            _arrow(d, (float(x), h - 4.0), (float(x), 6.2), C_LOAD_Q, 0.7, 3.4)
+        _line(d, (8.0, h - 4.0), (w - 8.0, h - 4.0), C_LOAD_Q, 0.9)
+    elif kind == "moment":
+        r = 8.0
+        arc = [(mid + r * math.cos(t), h / 2 + r * math.sin(t)) for t in np.linspace(-0.8, 3.9, 28)]
+        _poly(d, arc[:-2], C_LOAD, 1.3)
+        _arrow(d, arc[-4], arc[-1], C_LOAD, 1.3, 4.5)
+        d.add(Circle(mid, h / 2, 1.3, fillColor=C_MEMBER, strokeColor=None))
+    elif kind == "global":
+        _draw_triad(d, (mid - 10.0, 3.0), 14.0)
+    elif kind == "local":
+        a, b = (8.0, 4.0), (w - 8.0, h - 6.0)
+        _line(d, a, b, C_MEMBER, 1.8)
+        L = math.hypot(b[0] - a[0], b[1] - a[1])
+        c, s = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+        o = (mid - s * 3.0, h / 2 - 1.0 + c * 3.0)
+        _arrow(d, o, (o[0] + c * 12.0, o[1] + s * 12.0), C_AXIS, 0.8, 3.4)
+        _arrow(d, o, (o[0] - s * 9.0, o[1] + c * 9.0), C_AXIS, 0.8, 3.4)
+    elif kind == "deformed":
+        _line(d, (6.0, h - 8.0), (w - 6.0, h - 8.0), C_GHOST, 1.2)
+        xs = np.linspace(6.0, w - 6.0, 20)
+        _poly(d, [(float(x), h - 8.0 - 10.0 * math.sin(math.pi * (x - 6.0) / (w - 12.0))) for x in xs],
+              C_DEFORMED, 1.6)
+    elif kind == "diagram":
+        xs = np.linspace(6.0, w - 6.0, 20)
+        pts = [(float(x), h - 6.0 - 14.0 * math.sin(math.pi * (x - 6.0) / (w - 12.0))) for x in xs]
+        ring = [(6.0, h - 6.0), *pts, (w - 6.0, h - 6.0)]
+        d.add(Polygon([cc for p in ring for cc in p], fillColor=_tint(C_DIAG["M"], 0.18), strokeColor=None))
+        _poly(d, pts, C_DIAG["M"], 1.2)
+        _line(d, (6.0, h - 6.0), (w - 6.0, h - 6.0), C_MEMBER, 1.4)
+    elif kind == "dim":
+        _draw_dim(d, (6.0, h / 2 - 3.0), (w - 6.0, h / 2 - 3.0), "2.50", True)
+    return d
+
+
+def _graphic_symbols() -> tuple[tuple[str, str, str], ...]:
+    """(ícono, nombre, significado)."""
+    return (
+        ("fixed", "Empotrado", "Apoyo que restringe ux, uy y θz (traslaciones y giro)."),
+        ("pinned", "Articulado", "Apoyo que restringe ux y uy; permite el giro."),
+        ("roller", "Móvil", "Apoyo que restringe sólo uy; permite desplazamiento en X y giro."),
+        ("point", "Carga concentrada", "Fuerza aplicada en un nodo; la flecha indica su sentido real."),
+        ("dist", "Carga distribuida", "Carga por unidad de longitud; la altura es proporcional a q "
+                                      "(variación lineal entre extremos)."),
+        ("moment", "Momento aplicado",
+         "Momento concentrado en un nodo; la flecha indica el sentido de giro."),
+        ("global", "Ejes globales", "Terna X-Y de referencia y sentido positivo de Mz (antihorario)."),
+        ("local", "Ejes locales", "x' sobre la barra de i a j, y' a +90°. Referencia del signo de N y V."),
+        ("deformed", "Deformada", "En azul, la deformada amplificada; en gris, la geometría sin deformar."),
+        ("diagram", "Diagrama", "Área coloreada proporcional a la solicitación (M del lado traccionado)."),
+        ("dim", "Cota", "Distancia entre puntos de la estructura, en m."),
+    )
+
+
+def _section_glossary() -> list[Flowable]:
+    out: list[Flowable] = [_h1("6. Glosario y simbología"), _h2("6.1 Notación")]
+
+    # Notación: tabla con filas de grupo
+    data: list[list[Any]] = [[_p("Símbolo", "cell_h"), _p("Descripción", "cell_h"), _p("Unidad", "cell_hr")]]
+    style: list[tuple[Any, ...]] = [
+        ("BACKGROUND", (0, 0), (-1, 0), HEAD_BG),
+        ("LINEABOVE", (0, 0), (-1, 0), 0.8, ACCENT),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.5, ACCENT),
+        ("LINEBELOW", (0, -1), (-1, -1), 0.8, ACCENT),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 2.2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2.2),
+    ]
+    for group, rows in _notation():
+        r = len(data)
+        data.append([_p(f"<b>{group}</b>", "cell"), "", ""])
+        style += [("SPAN", (0, r), (-1, r)), ("BACKGROUND", (0, r), (-1, r), ZEBRA),
+                  ("LINEABOVE", (0, r), (-1, r), 0.3, RULE)]
+        for sym, desc, unit in rows:
+            data.append([_p(f"<b>{sym}</b>", "cell"), _p(desc, "cell"), _p(unit, "cell_r")])
+    t = Table(data, colWidths=[0.16 * CONTENT_W, 0.70 * CONTENT_W, 0.14 * CONTENT_W], repeatRows=1,
+              hAlign="LEFT")
+    t.setStyle(TableStyle(style))
+    out.append(t)
+
+    # Símbolos gráficos: ícono vectorial + nombre + significado
+    out.append(_h2("6.2 Símbolos gráficos"))
+    gdata: list[list[Any]] = [[_p("Símbolo", "cell_h"), _p("Nombre", "cell_h"), _p("Significado", "cell_h")]]
+    for kind, name, meaning in _graphic_symbols():
+        gdata.append([_icon(kind), _p(f"<b>{name}</b>", "cell"), _p(meaning, "cell")])
+    g = Table(gdata, colWidths=[0.14 * CONTENT_W, 0.20 * CONTENT_W, 0.66 * CONTENT_W], repeatRows=1,
+              hAlign="LEFT")
+    gstyle: list[tuple[Any, ...]] = [
+        ("BACKGROUND", (0, 0), (-1, 0), HEAD_BG),
+        ("LINEABOVE", (0, 0), (-1, 0), 0.8, ACCENT),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.5, ACCENT),
+        ("LINEBELOW", (0, 1), (-1, -2), 0.25, RULE),
+        ("LINEBELOW", (0, -1), (-1, -1), 0.8, ACCENT),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 1), (0, -1), "CENTER"),
+        ("TOPPADDING", (0, 1), (-1, -1), 2.5),
+        ("BOTTOMPADDING", (0, 1), (-1, -1), 2.5),
+    ]
+    g.setStyle(TableStyle(gstyle))
+    out.append(g)
+
+    # Términos
+    out.append(_h2("6.3 Términos"))
+    out.append(_table(["Término", "Definición"], [[f"<b>{k}</b>", v] for k, v in _TERMS], [0.24, 0.76]))
+    return out
 
 
 # --------------------------------------------------------------------------- #
