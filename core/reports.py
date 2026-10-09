@@ -22,8 +22,8 @@ from __future__ import annotations
 import datetime as dt
 import io
 import math
-from collections.abc import Sequence
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
