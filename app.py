@@ -6,11 +6,14 @@ Nada de cálculo estructural acá.
 
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 import streamlit as st
 
 from core.design import suggest_section
 from core.model import Model
+from core.reports import build_pdf_report
 from core.solver import Results, StructuralError, solve
 from core.verification import SafetyCheck, Status, check_safety
 from ui.inputs import AppInputs, sidebar
@@ -23,6 +26,12 @@ STATUS_STYLE = {
     Status.ALERT: ("#B45309", "#FEF3C7", "FS BAJO"),
     Status.FAIL: ("#B91C1C", "#FEE2E2", "FLUENCIA"),
 }
+
+
+def _pdf_filename(title: str) -> str:
+    normalized = title.strip().encode("ascii", "ignore").decode("ascii")
+    filename = re.sub(r"[^A-Za-z0-9]+", "_", normalized).strip("_").lower()
+    return f"{filename or 'memoria'}.pdf"
 
 
 def fs_badge(chk: SafetyCheck) -> None:
@@ -83,6 +92,15 @@ def main() -> None:
             f"FS = {chk.fs:.2f} < {chk.fs_min:g} en barra {chk.member}, punto "
             f"({chk.point[0] / 1e3:.2f}; {chk.point[1] / 1e3:.2f}) m — σ = {chk.sigma_max:.1f} MPa."
         )
+
+    # ---- Memoria ---------------------------------------------------------- #
+    with st.expander("Memoria de cálculo (PDF)"):
+        report_title = st.text_input("Título", value="Memoria de Cálculo")
+        author = st.text_input("Autor", value="")
+        pdf = build_pdf_report(model, res, chk, report_title, author,
+                               reference_length=inp.span_mm)
+        st.download_button("Descargar memoria", data=pdf, file_name=_pdf_filename(report_title),
+                           mime="application/pdf")
 
     # ---- Gráficos ---------------------------------------------------------- #
     tabs = st.tabs(["Estructura y deformada", "Momento M", "Corte V", "Normal N", "Tensión σ", "Reacciones",
