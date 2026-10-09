@@ -4,10 +4,18 @@ Unidades SI-mm: longitudes en mm, áreas en mm², inercias en mm⁴,
 módulos resistentes en mm³, tensiones y módulo elástico en MPa (N/mm²),
 densidad en kg/m³.
 
-Los valores tabulados de perfiles laminados (IPE / IPN) provienen de tablas
-de catálogo usuales (Euronorm 19-57 / DIN 1025). Los tubos se calculan a
-partir de su geometría nominal (esquinas vivas para RHS/SHS, conservador).
-Verificar siempre contra el catálogo del proveedor antes de un cálculo final.
+Los valores tabulados de perfiles laminados provienen de tablas de catálogo
+usuales: IPE / IPN (Euronorm 19-57 / DIN 1025), UPN (DIN 1026-1) y W
+(ASTM A6/A6M, AISC Shapes Database v15.0). Los tubos y los perfiles C de chapa
+doblada se calculan a partir de su geometría nominal (tubos con esquinas vivas,
+conservador; perfiles C con radio interior de plegado). Verificar siempre contra
+el catálogo del proveedor antes de un cálculo final.
+
+Todas las secciones se usan en flexión alrededor del eje fuerte (x-x). UPN y C
+son simétricos respecto de ese eje (c_top = c_bot = h/2), pero su centro de
+corte no coincide con el baricentro: el modelo no considera la torsión que
+aparece si la carga no pasa por el centro de corte (limitación de
+predimensionamiento, ver AGENTS.md §10).
 """
 
 from __future__ import annotations
@@ -102,6 +110,66 @@ def rolled_i(name: str, family: str, h: float, b: float, A_cm2: float, I_cm4: fl
     )
 
 
+def rolled_channel(name: str, h: float, b: float, A_cm2: float, I_cm4: float) -> Section:
+    """Perfil laminado U (UPN) en eje fuerte a partir de valores de tabla (cm², cm⁴).
+
+    Simétrico respecto del eje x-x, por lo que c_top = c_bot = h/2.
+    """
+    return Section(
+        name=name, family="UPN", A=A_cm2 * 100.0, I=I_cm4 * 1e4,
+        c_top=h / 2.0, c_bot=h / 2.0, h=h, b=b,
+    )
+
+
+def wide_flange(name: str, d: float, bf: float, A: float, I: float) -> Section:  # noqa: E741
+    """Perfil W (ala ancha, ASTM A6) a partir de valores de tabla ya en mm, mm², mm⁴.
+
+    `d` es la altura real del perfil (no la nominal de la designación).
+    """
+    return Section(
+        name=name, family="Perfil W", A=A, I=I,
+        c_top=d / 2.0, c_bot=d / 2.0, h=d, b=bf,
+    )
+
+
+def cold_formed_channel(name: str, H: float, B: float, t: float, r_i: float | None = None) -> Section:
+    """Perfil C de chapa doblada (canal sin labios), propiedades geométricas exactas.
+
+    H = altura exterior del alma, B = ancho exterior del ala, t = espesor,
+    r_i = radio interior de plegado (por defecto r_i = t, práctica usual de plegado
+    en acero al carbono). La sección se descompone en tramos rectos (alma y alas)
+    y cuatro esquinas en cuarto de corona circular, integradas en forma cerrada:
+      corona (r_i, r_o = r_i + t): A_c = π/4·(r_o² − r_i²),
+      I propia respecto del centro de curvatura = π/16·(r_o⁴ − r_i⁴),
+      momento estático respecto de ese centro Q = (r_o³ − r_i³)/3,
+      traslado al eje x-x: I = I_c + 2·d·Q + d²·A_c, con d = H/2 − r_o.
+    """
+    r_in = t if r_i is None else r_i
+    r_o = r_in + t
+    if not (t > 0.0 and r_in >= 0.0 and H > 2.0 * r_o and B > r_o):
+        raise ValueError(f"Geometría inválida para el perfil C {name!r}: revisar H, B, t y r_i.")
+    # Alma (tramo recto, centrado en el eje x-x)
+    hw = H - 2.0 * r_o
+    A_web = t * hw
+    I_web = t * hw**3 / 12.0
+    # Alas (tramo recto), una arriba y otra abajo
+    bf = B - r_o
+    y_f = H / 2.0 - t / 2.0
+    A_fl = t * bf
+    I_fl = bf * t**3 / 12.0 + A_fl * y_f**2
+    # Esquinas (cuarto de corona), centro de curvatura a d = H/2 − r_o del eje x-x
+    A_c = math.pi / 4.0 * (r_o**2 - r_in**2)
+    I_c0 = math.pi / 16.0 * (r_o**4 - r_in**4)
+    Q_c0 = (r_o**3 - r_in**3) / 3.0
+    d = H / 2.0 - r_o
+    I_c = I_c0 + 2.0 * d * Q_c0 + d**2 * A_c
+    return Section(
+        name=name, family="Perfil C (Conformado)",
+        A=A_web + 2.0 * (A_fl + A_c), I=I_web + 2.0 * (I_fl + I_c),
+        c_top=H / 2.0, c_bot=H / 2.0, h=H, b=B,
+    )
+
+
 def chs(name: str, D: float, t: float) -> Section:
     """Tubo circular (CHS / caño)."""
     d = D - 2.0 * t
@@ -182,6 +250,45 @@ _IPN: dict[int, tuple[float, float, float, float]] = {
     300: (300, 125, 69.0, 9800.0),
 }
 
+# UPN — DIN 1026-1 (EN 10279): (h [mm], b [mm], A [cm²], Ix [cm⁴])
+_UPN: dict[int, tuple[float, float, float, float]] = {
+    80: (80, 45, 11.0, 106.0),
+    100: (100, 50, 13.5, 206.0),
+    120: (120, 55, 17.0, 364.0),
+    140: (140, 60, 20.4, 605.0),
+    160: (160, 65, 24.0, 925.0),
+    180: (180, 70, 28.0, 1350.0),
+    200: (200, 75, 32.2, 1910.0),
+    220: (220, 80, 37.4, 2690.0),
+    240: (240, 85, 42.3, 3600.0),
+    260: (260, 90, 48.3, 4820.0),
+    280: (280, 95, 53.3, 6280.0),
+    300: (300, 100, 58.8, 8030.0),
+}
+
+# Perfiles W — ASTM A6/A6M, AISC Shapes Database v15.0. Valores de la tabla en
+# unidades US convertidos a SI (1 in = 25,4 mm) y redondeados; equivalente US en
+# el comentario. (d [mm], bf [mm], A [mm²], Ix [mm⁴]); d = altura real.
+_W: dict[str, tuple[float, float, float, float]] = {
+    "W 150x13": (148.1, 100.1, 1626.0, 6.202e6),  # W6x8.5
+    "W 150x18": (153.2, 101.6, 2290.0, 9.199e6),  # W6x12
+    "W 200x15": (200.4, 100.1, 1910.0, 12.82e6),  # W8x10
+    "W 200x22.5": (206.0, 102.0, 2865.0, 19.98e6),  # W8x15
+    "W 250x28.4": (260.1, 102.1, 3626.0, 40.08e6),  # W10x19
+    "W 310x38.7": (310.4, 164.8, 4935.0, 84.91e6),  # W12x26
+}
+
+# Perfiles C de chapa doblada (canal sin labios), geometría nominal de la
+# designación C H x B x t: (H [mm], B [mm], t [mm]); r_i = t (ver cold_formed_channel).
+_C_COLD: tuple[tuple[float, float, float], ...] = (
+    (80, 40, 2.0),
+    (100, 50, 2.0),
+    (120, 50, 2.0),
+    (140, 60, 2.5),
+    (160, 60, 2.5),
+    (200, 75, 3.0),
+)
+
 # Caños API 5L / ASME B36.10 Sch 40: (NPS, D [mm], t [mm])
 _PIPE_SCH40: tuple[tuple[str, float, float], ...] = (
     ('1"', 33.4, 3.38),
@@ -212,6 +319,12 @@ def _build_catalog() -> dict[str, dict[str, Section]]:
         add(rolled_i(f"IPE {n}", "IPE", h, b, A, I))
     for n, (h, b, A, I) in _IPN.items():
         add(rolled_i(f"IPN {n}", "IPN", h, b, A, I))
+    for n, (h, b, A, I) in _UPN.items():
+        add(rolled_channel(f"UPN {n}", h, b, A, I))
+    for name, (d, bf, A, I) in _W.items():
+        add(wide_flange(name, d, bf, A, I))
+    for H, B, t in _C_COLD:
+        add(cold_formed_channel(f"C {H:g}x{B:g}x{t:g}", H, B, t))
     for nps, D, t in _PIPE_SCH40:
         add(chs(f"Caño {nps} Sch40 (Ø{D:g}x{t:g})", D, t))
     for B, H, t in _RHS:
@@ -223,6 +336,58 @@ SECTIONS: dict[str, dict[str, Section]] = _build_catalog()
 """Catálogo: familia -> nombre -> Section."""
 
 DEFAULT_SECTION = ("IPE", "IPE 200")
+
+
+# ---- Notas y advertencias por familia ----------------------------------------- #
+# Fuente única del criterio de ingeniería asociado a cada familia: la UI y la memoria
+# PDF muestran estos textos tal cual y no redactan advertencias propias (AGENTS.md §7.2).
+
+FAMILY_NOTES: dict[str, str] = {
+    "IPE": "Doble T laminado IPE (Euronorm 19-57). Propiedades nominales de tabla.",
+    "IPN": "Doble T laminado IPN, alas inclinadas (DIN 1025-1). Propiedades nominales de tabla.",
+    "UPN": "Canal laminado UPN (DIN 1026-1 / EN 10279), flexión en eje fuerte x-x. "
+           "Propiedades nominales de tabla.",
+    "Perfil W": "Ala ancha ASTM A6/A6M (AISC Shapes Database v15.0, convertido a SI). "
+                "La designación W d×m es altura nominal [mm] × masa [kg/m]; h es la altura real.",
+    "Perfil C (Conformado)": "Chapa doblada en frío, canal sin labios C H×B×t con radio interior "
+                             "de plegado igual al espesor. Propiedades brutas calculadas de la "
+                             "geometría nominal, no de catálogo de fabricante.",
+    "Tubo circular": "Caño ASME B36.10 Sch 40 / API 5L. Propiedades calculadas de D y t nominales.",
+    "Tubo cuadrado": "Tubo estructural. Propiedades calculadas de B, H y t con esquinas vivas.",
+    "Tubo rectangular": "Tubo estructural, flexión alrededor del eje de mayor altura H. Propiedades "
+                        "calculadas de B, H y t con esquinas vivas.",
+    "Macizo": "Barra maciza. Propiedades calculadas de la geometría.",
+    "Personalizado": "Sección simétrica definida por el usuario: A, I y c son responsabilidad de "
+                     "quien los ingresa.",
+}
+
+CHANNEL_FAMILIES: frozenset[str] = frozenset({"UPN", "Perfil C (Conformado)"})
+"""Familias de sección en canal (U/C): monosimétricas, centro de corte fuera del alma."""
+
+THIN_WALLED_FAMILIES: frozenset[str] = frozenset({"Perfil C (Conformado)"})
+"""Familias de chapa delgada conformada en frío, donde la abolladura local puede gobernar."""
+
+CHANNEL_TORSION_WARNING = (
+    "Sección en canal (U/C): el centro de corte queda del lado exterior del alma. Si la carga "
+    "no pasa por él, la pieza se tuerce y aparecen tensiones que este modelo no calcula. "
+    "Usar perfiles apareados (cajón o espalda con espalda) o restringir el giro."
+)
+
+THIN_WALL_WARNING = (
+    "Chapa conformada en frío: se usan propiedades brutas. La abolladura local de alas y alma "
+    "(ancho efectivo, AISI S100 / CIRSOC 303) puede reducir la capacidad real; el FS informado "
+    "no la considera."
+)
+
+
+def family_warnings(family: str) -> tuple[str, ...]:
+    """Advertencias de alcance que la UI y la memoria deben mostrar para una familia."""
+    out: list[str] = []
+    if family in CHANNEL_FAMILIES:
+        out.append(CHANNEL_TORSION_WARNING)
+    if family in THIN_WALLED_FAMILIES:
+        out.append(THIN_WALL_WARNING)
+    return tuple(out)
 
 
 def get_section(name: str) -> Section:

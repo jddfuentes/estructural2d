@@ -15,7 +15,17 @@ import pandas as pd
 import streamlit as st
 
 from core.builders import BeamDistLoad, BeamPointLoad, BeamSupport, build_beam, build_portal_frame
-from core.materials import DEFAULT_MATERIAL, DEFAULT_SECTION, MATERIALS, SECTIONS, Material, Section, custom
+from core.materials import (
+    DEFAULT_MATERIAL,
+    DEFAULT_SECTION,
+    FAMILY_NOTES,
+    MATERIALS,
+    SECTIONS,
+    Material,
+    Section,
+    custom,
+    family_warnings,
+)
 from core.model import Model, SupportType
 from core.verification import FS_MIN_DEFAULT
 
@@ -50,6 +60,11 @@ def _section_picker(label: str, key: str) -> tuple[Section, str]:
     families = [*SECTIONS.keys(), "Personalizado"]
     fam = st.selectbox(f"{label}: familia", families, index=families.index(DEFAULT_SECTION[0]),
                        key=f"{key}_fam")
+    note = FAMILY_NOTES.get(fam)
+    if note:
+        st.caption(note)
+    for warning in family_warnings(fam):
+        st.warning(warning)
     if fam == "Personalizado":
         c1, c2 = st.columns(2)
         I_cm4 = c1.number_input("I [cm⁴]", min_value=0.01, value=1943.0, key=f"{key}_I")

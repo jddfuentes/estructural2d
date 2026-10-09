@@ -42,6 +42,25 @@ def _text(pdf: bytes) -> str:
     return "\n".join(p.extract_text() for p in reader.pages)
 
 
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_channel_section_notes_and_warnings_in_report():
+    """Perfil UPN: nota de fuente en 2.4 y advertencia de torsión en 5; ausentes con IPE."""
+    m, r, c = _beam(section="UPN 200")
+    text = _flat(_text(build_pdf_report(m, r, c, date=DATE)))
+    body = text[:text.index("6. Glosario y simbología")]
+    assert "DIN 1026-1" in body
+    assert "Sección en canal (U/C)" in body
+
+    m, r, c = _beam()
+    body = _flat(_text(build_pdf_report(m, r, c, date=DATE)))
+    body = body[:body.index("6. Glosario y simbología")]
+    assert "Euronorm 19-57" in body
+    assert "Sección en canal (U/C)" not in body
+
+
 def test_returns_valid_pdf_bytes():
     m, r, c = _beam()
     pdf = build_pdf_report(m, r, c, "Viga de prueba", "J. Fuentes", date=DATE)

@@ -33,7 +33,7 @@ app.py            Orquestación Streamlit. NO calcula nada.
  ├── ui/inputs.py   Sidebar -> Model. ÚNICO lugar con conversión de unidades de UI.
  ├── ui/plots.py    Model/Results -> go.Figure (sin Streamlit; reutilizable en reportes)
  └── core/          Motor puro. Sin Streamlit, sin Plotly, sin pandas, sin I/O.
-      ├── materials.py     Material, Section, catálogo (IPE, IPN, caños Sch40, tubos)
+      ├── materials.py     Material, Section, catálogo (IPE, IPN, UPN, W, C conformado, caños Sch40, tubos)
       ├── model.py         Model, Member, Support, NodalLoad, DistributedLoad (dataclasses)
       ├── builders.py      build_beam(), build_portal_frame(): definición "de ingeniero" -> Model
       ├── solver.py        solve(model) -> Results  (función pura)
@@ -103,6 +103,9 @@ core.solver.Results.extreme(quantity: str) -> Extreme      # "N","V","M","sigma"
 core.verification.check_safety(model, results, fs_min=1.5) -> SafetyCheck
 core.builders.build_beam(...) / build_portal_frame(...) -> Model
 core.design.suggest_section(build, family, fs_min, max_deflection=None) -> Suggestion | None
+core.materials.SECTIONS[family][name] -> Section             # claves de familia estables (ver abajo)
+core.materials.FAMILY_NOTES[family] -> str                   # fuente y supuestos de cada familia
+core.materials.family_warnings(family) -> tuple[str, ...]    # advertencias de alcance (UI y PDF)
 core.reports.build_pdf_report(model, results, check, project_title="Memoria de Cálculo", author="",
                               *, date=None, reference_length=None,
                               include_figures=True, include_glossary=True) -> bytes  # b"%PDF..."
@@ -111,6 +114,11 @@ core.glossary.to_markdown(include_graphics=True, heading_level=2) -> str  # para
 ui.plots.plot_structure(model, results=None, deformed_scale=None, ...) -> go.Figure
 ui.plots.plot_diagram(model, results, quantity, moment_on_tension_side=True) -> go.Figure
 ```
+
+Claves de familia de `SECTIONS` (estables; renombrarlas es un cambio de API): `"IPE"`, `"IPN"`,
+`"UPN"`, `"Perfil W"`, `"Perfil C (Conformado)"`, `"Tubo circular"`, `"Tubo cuadrado"`,
+`"Tubo rectangular"`. Fuera del catálogo, los constructores usan `"Macizo"` y `"Personalizado"`.
+Toda familia nueva lleva entrada en `FAMILY_NOTES` (hay test que lo controla).
 
 Errores: datos inválidos → `ValueError`; estructura inestable → `core.solver.StructuralError`.
 Mensajes en castellano y accionables (la UI los muestra tal cual).
@@ -147,6 +155,8 @@ Mensajes en castellano y accionables (la UI los muestra tal cual).
   mostrado sale de `Results`, `SafetyCheck` o `Section`.
 - **Reglas:** `ui/plots.py` sin Streamlit (devuelve `go.Figure`); colores definidos como
   constantes al inicio del módulo; convención de M del lado traccionado por defecto.
+  Las notas y advertencias de una familia de perfiles se leen de `core.materials.FAMILY_NOTES`
+  y `family_warnings()`; la UI no redacta criterio de ingeniería propio.
 - **Entrega:** app corriendo sin excepciones en ambos modos (Viga / Pórtico). Prueba
   mínima headless:
   ```python
@@ -209,4 +219,6 @@ Backlog priorizado (no implementar sin tarea explícita):
 
 Elástico lineal, pequeñas deformaciones, Euler-Bernoulli (sin deformación por corte),
 sin efectos de segundo orden, sin pandeo ni fatiga, propiedades de catálogo nominales.
+Por familia (`family_warnings()`): torsión no modelada en canales UPN / C cuando la carga no
+pasa por el centro de corte; abolladura local no verificada en chapa conformada en frío.
 Es una herramienta de **predimensionamiento**, no reemplaza la memoria de cálculo.
