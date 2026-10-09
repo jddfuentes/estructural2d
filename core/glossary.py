@@ -113,6 +113,12 @@ NOTATION: tuple[Group, ...] = (
                 "mm",
             ),
             Entry("L/δ", "Flecha relativa: longitud de referencia dividida por δ_{máx}."),
+            Entry(
+                "δ_{adm}, L/N",
+                "Flecha admisible de servicio: δ_{adm} = L/N (por defecto N = 300). "
+                "Verifica si δ_{máx} ≤ δ_{adm}.",
+                "mm",
+            ),
         ),
     ),
     Group(
@@ -217,6 +223,12 @@ TERMS: tuple[Term, ...] = (
         "Punto de la sección por el que debe pasar la carga transversal para que la barra "
         "flexione sin torsión. Coincide con el baricentro en secciones doblemente simétricas; "
         "en canales (UPN, C) queda del lado exterior del alma.",
+    ),
+    Term(
+        "Estado límite de servicio",
+        "Condición de uso que no compromete la resistencia pero limita la aptitud de la estructura "
+        "(flechas, vibraciones). Acá se controla la flecha: δ_{máx} ≤ L/N. Si no se cumple sin "
+        "fluencia, el veredicto es ALERTA.",
     ),
     Term(
         "Fluencia",

@@ -226,6 +226,7 @@ def test_find_lightest_and_suggest_section_new_families():
 
     Viga simple L = 6 m, q = 10 N/mm: M = qL²/8 = 45e6 N·mm; con FS 1,5 y Sy = 250 MPa,
     W_req = 270e3 mm³ -> el UPN más liviano con W >= W_req es UPN 240 (W = 300 cm³).
+    Con flecha L/300 = 20 mm: δ = 5qL⁴/384EI ⇒ I ≥ 4219 cm⁴ -> UPN 260 (UPN 240: δ = 23,4 mm).
     """
     from core.design import suggest_section
 
@@ -242,8 +243,11 @@ def test_find_lightest_and_suggest_section_new_families():
         sug = suggest_section(build, fam, fs_min=1.5)
         if sug is not None:
             assert sug.section.family == fam and sug.check.fs >= 1.5
-    sug_upn = suggest_section(build, "UPN", fs_min=1.5)
+    sug_upn = suggest_section(build, "UPN", fs_min=1.5, deflection_limit_ratio=0.0)
     assert sug_upn is not None and sug_upn.section.name == "UPN 240"
+    sug_upn = suggest_section(build, "UPN", fs_min=1.5)  # L/300 por defecto
+    assert sug_upn is not None and sug_upn.section.name == "UPN 260"
+    assert sug_upn.check.delta_max == pytest.approx(5 * 10.0 * L**4 / (384 * mat.E * 4820e4), rel=1e-6)
 
 
 def test_every_family_has_a_note():

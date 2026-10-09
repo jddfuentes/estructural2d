@@ -88,6 +88,21 @@ def test_verdict_matches_check(q, status):
     assert f"VEREDICTO: {status.value}" in _text(build_pdf_report(m, r, c, date=DATE))
 
 
+def test_deflection_alert_in_report():
+    """IPE 240, L = 8 m, q = 5 N/mm: FS = 2,03 pero δ = 5qL⁴/384EI = 34,3 mm > L/300 ⇒ ALERTA por flecha."""
+    L = 8000.0
+    m = build_beam(L, [BeamSupport(0, ST.PINNED), BeamSupport(L, ST.ROLLER)], get_section("IPE 240"), MAT,
+                   dist_loads=[BeamDistLoad(0.0, L, -5.0, -5.0)])
+    r = solve(m)
+    c = check_safety(m, r)
+    assert c.status is Status.ALERT and c.strength_ok and not c.deflection_ok
+    text = " ".join(_text(build_pdf_report(m, r, c, date=DATE)).split())
+    assert "VEREDICTO: ALERTA — flecha mayor a la admisible (servicio)" in text
+    assert "FS menor al admisible" not in text
+    assert f"L/300 = {L / 300:,.2f} mm" in text
+    assert f"{c.delta_max:,.2f} mm" in text
+
+
 def test_key_numbers_in_report():
     """FS y σ del PDF coinciden con SafetyCheck; flecha relativa con la longitud de referencia."""
     m, r, c = _beam(-3.0, P=0.0)

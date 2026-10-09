@@ -100,9 +100,13 @@ en el mismo commit.
 ```python
 core.solver.solve(model: Model, n_stations: int = 41) -> Results
 core.solver.Results.extreme(quantity: str) -> Extreme      # "N","V","M","sigma","deflection","uy"
-core.verification.check_safety(model, results, fs_min=1.5) -> SafetyCheck
+core.verification.check_safety(model, results, fs_min=1.5, deflection_limit_ratio=300.0,
+                               reference_length=None) -> SafetyCheck
+core.verification.SafetyCheck: .status, .ok, .strength_ok, .issues; ELS: .delta_max, .deflection_ratio,
+                               .deflection_limit_ratio, .deflection_ok, .reference_length, .delta_adm
 core.builders.build_beam(...) / build_portal_frame(...) -> Model
-core.design.suggest_section(build, family, fs_min, max_deflection=None) -> Suggestion | None
+core.design.suggest_section(build, family, fs_min, max_deflection=None,
+                            deflection_limit_ratio=300.0) -> Suggestion | None
 core.materials.SECTIONS[family][name] -> Section             # claves de familia estables (ver abajo)
 core.materials.FAMILY_NOTES[family] -> str                   # fuente y supuestos de cada familia
 core.materials.family_warnings(family) -> tuple[str, ...]    # advertencias de alcance (UI y PDF)
@@ -119,6 +123,13 @@ Claves de familia de `SECTIONS` (estables; renombrarlas es un cambio de API): `"
 `"UPN"`, `"Perfil W"`, `"Perfil C (Conformado)"`, `"Tubo circular"`, `"Tubo cuadrado"`,
 `"Tubo rectangular"`. Fuera del catálogo, los constructores usan `"Macizo"` y `"Personalizado"`.
 Toda familia nueva lleva entrada en `FAMILY_NOTES` (hay test que lo controla).
+
+Verificación (`Status`): `FLUENCIA` si FS < 1; `ALERTA` si FS < FS_min **o** la flecha supera
+L/N (estado límite de servicio, sin fluencia); `OK` sólo si verifican resistencia y flecha.
+`deflection_limit_ratio = 0` desactiva el control de flecha. L por defecto: ancho horizontal del
+modelo (`default_reference_length`). `max_deflection` [mm] de `suggest_section`, si se da,
+reemplaza a `deflection_limit_ratio`. El motivo de un veredicto no-OK se lee de
+`SafetyCheck.issues` (castellano, listo para mostrar); la UI no lo reconstruye.
 
 Errores: datos inválidos → `ValueError`; estructura inestable → `core.solver.StructuralError`.
 Mensajes en castellano y accionables (la UI los muestra tal cual).
@@ -219,6 +230,8 @@ Backlog priorizado (no implementar sin tarea explícita):
 
 Elástico lineal, pequeñas deformaciones, Euler-Bernoulli (sin deformación por corte),
 sin efectos de segundo orden, sin pandeo ni fatiga, propiedades de catálogo nominales.
+Flecha: δ_máx es el desplazamiento total máximo de toda la estructura (en pórticos incluye el
+desplazamiento lateral) referido a una única L; en voladizos L es la longitud del voladizo.
 Por familia (`family_warnings()`): torsión no modelada en canales UPN / C cuando la carga no
 pasa por el centro de corte; abolladura local no verificada en chapa conformada en frío.
 Es una herramienta de **predimensionamiento**, no reemplaza la memoria de cálculo.
