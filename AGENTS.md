@@ -39,7 +39,8 @@ app.py            Orquestación Streamlit. NO calcula nada.
       ├── solver.py        solve(model) -> Results  (función pura)
       ├── verification.py  check_safety() -> SafetyCheck (FS, estado OK/ALERTA/FLUENCIA)
       ├── design.py        suggest_section(): perfil más liviano que verifica
-      └── reports.py       build_pdf_report() -> bytes: memoria de cálculo A4 (ReportLab)
+      ├── reports.py       build_pdf_report() -> bytes: memoria A4 con figuras vectoriales (ReportLab)
+      └── fonts/           DejaVu Sans (TTF + licencia) embebida en el PDF; no tocar sin motivo
 tests/            pytest, casos analíticos con fórmula de referencia
 ```
 
@@ -55,6 +56,9 @@ Regla dura (se verifica en revisión):
 Chequeo rápido: `grep -rnE "streamlit|plotly|pandas" core/` debe devolver vacío.
 Ambas reglas están automatizadas en `tests/test_architecture_and_app.py`.
 `core/__init__.py` **no** reexporta `build_pdf_report`: importar `core` no debe arrastrar ReportLab.
+Excepción a "sin I/O": `core/reports.py` lee **sólo** las fuentes de `core/fonts/`, una vez al
+importarse. Las figuras del PDF se dibujan con `reportlab.graphics` desde `Model`/`Results`
+(no se exportan figuras Plotly: evita depender de Chrome/kaleido y mantiene el core sin Plotly).
 
 ## 4. Unidades y convenciones de signo
 
@@ -99,7 +103,8 @@ core.verification.check_safety(model, results, fs_min=1.5) -> SafetyCheck
 core.builders.build_beam(...) / build_portal_frame(...) -> Model
 core.design.suggest_section(build, family, fs_min, max_deflection=None) -> Suggestion | None
 core.reports.build_pdf_report(model, results, check, project_title="Memoria de Cálculo", author="",
-                              *, date=None, reference_length=None) -> bytes   # empieza con b"%PDF"
+                              *, date=None, reference_length=None,
+                              include_figures=True) -> bytes                 # empieza con b"%PDF"
 ui.plots.plot_structure(model, results=None, deformed_scale=None, ...) -> go.Figure
 ui.plots.plot_diagram(model, results, quantity, moment_on_tension_side=True) -> go.Figure
 ```
@@ -190,8 +195,9 @@ Backlog priorizado (no implementar sin tarea explícita):
 4. Tensión de corte (τ = VQ/It) y von Mises combinada.
 5. Flexión en eje débil y secciones asimétricas (ya soportadas en `Section` vía `c_top/c_bot`).
 6. Pórticos genéricos (editor de nodos/barras) y cargas térmicas.
-7. ~~Reporte PDF de memoria de cálculo~~ → hecho (`core/reports.py`). Pendiente: incluir
-   figuras de diagramas (requiere renderizar sin Plotly en el core o pasar PNG desde la UI).
+7. ~~Reporte PDF de memoria de cálculo~~ → hecho (`core/reports.py`), con esquema de cargas,
+   deformada y diagramas N-V-M-σ vectoriales. Si se cambia un gráfico de `ui/plots.py`, revisar
+   que el equivalente del PDF siga la misma convención (colores, M del lado traccionado).
 
 ## 10. Limitaciones que la UI debe seguir comunicando
 
