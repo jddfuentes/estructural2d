@@ -224,11 +224,24 @@ $$
 El valor de la estructura es el menor `FS` de todas las barras. El umbral de UI
 por defecto es `FS_min = 1.5`:
 
+Además se controla el estado límite de servicio por flecha:
+
+$$
+\frac{L}{\delta_{max}} \ge N \quad \Longleftrightarrow \quad \delta_{max} \le \delta_{adm} = \frac{L}{N}
+$$
+
+con `δ_max` el desplazamiento total máximo de la estructura, `L` la longitud de
+referencia (por defecto el ancho horizontal del modelo, es decir la luz) y `N = 300`
+por defecto (`N = 0` desactiva el control).
+
 | Estado | Criterio |
 | --- | --- |
-| `OK` | `FS >= FS_min` |
-| `ALERTA` | `1 <= FS < FS_min` |
-| `FLUENCIA` | `FS < 1` |
+| `OK` | `FS >= FS_min` y `δ_max <= L/N` |
+| `ALERTA` | `1 <= FS < FS_min`, o flecha excesiva sin fluencia |
+| `FLUENCIA` | `FS < 1` (domina sobre la flecha) |
+
+La búsqueda del perfil más liviano (`suggest_section`) aplica los dos criterios: un
+perfil que resiste pero excede la flecha se descarta.
 
 Este no es todavía un criterio normativo completo. El factor debe revisarse según
 el material, la norma aplicable, las combinaciones de carga y si se trabaja con
@@ -292,5 +305,10 @@ convención de signos y tolerancia. El estado de referencia del MVP es:
   local en chapa delgada) centralizadas en `core/materials.py` y volcadas en la
   memoria PDF. Sin cambios de signos ni unidades. Tests en
   `tests/test_materials_verification.py` y `tests/test_reports.py`.
+- **2026-10-09 · Verificación de flecha (ELS):** `check_safety` incorpora
+  `δ_max ≤ L/N` (N = 300 por defecto) y el veredicto pasa a ALERTA si la flecha
+  excede el límite sin fluencia; `suggest_section` descarta perfiles con flecha
+  excesiva. Sin cambios de signos ni unidades. Tests en `tests/test_deflection.py`
+  (δ = 5qL⁴/384EI, σ = qL²/8W).
 - Las decisiones nuevas deben agregarse aquí indicando fecha, motivación, impacto
   en signos/unidades y tests de validación asociados.

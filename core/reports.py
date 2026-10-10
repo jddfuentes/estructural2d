@@ -57,7 +57,7 @@ from core.glossary import GRAPHIC_SYMBOLS, NOTATION, TERMS
 from core.materials import FAMILY_NOTES, Material, Section, family_warnings
 from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model, SupportType
 from core.solver import MemberResult, Results
-from core.verification import SafetyCheck, Status
+from core.verification import SafetyCheck, Status, default_reference_length
 
 __all__ = ["build_pdf_report"]
 
@@ -89,9 +89,25 @@ STATUS_COLORS: dict[Status, tuple[colors.Color, colors.Color]] = {
 }
 VERDICT_TEXT: dict[Status, str] = {
     Status.OK: "OK — VERIFICA",
-    Status.ALERT: "ALERTA — FS menor al admisible",
+    Status.ALERT: "ALERTA",
     Status.FAIL: "FLUENCIA — σ<sub>máx</sub> supera Sy",
 }
+
+
+def _verdict_text(check: SafetyCheck) -> str:
+    """Veredicto con el motivo: resistencia (FS) y/o servicio (flecha)."""
+    if check.status is Status.OK:
+        return VERDICT_TEXT[Status.OK]
+    reasons = []
+    if check.status is Status.ALERT and not check.strength_ok:
+        reasons.append("FS menor al admisible")
+    if not check.deflection_ok:
+        reasons.append("flecha mayor a la admisible (servicio)")
+    head = VERDICT_TEXT[check.status]
+    if not reasons:
+        return head
+    return head + (" — " if check.status is Status.ALERT else " · ") + " y ".join(reasons)
+
 
 PAGE_W, PAGE_H = A4
 MARGIN_X, MARGIN_TOP, MARGIN_BOT = 20 * mm, 24 * mm, 20 * mm
@@ -174,7 +190,7 @@ def build_pdf_report(
     date = date or dt.date.today()
     title = project_title.strip() or "Memoria de Cálculo"
     author = author.strip()
-    L_ref = reference_length if reference_length else _horizontal_extent(model)
+    L_ref = reference_length if reference_length else (check.reference_length or _horizontal_extent(model))
 
     buf = io.BytesIO()
     doc = _Doc(buf, title=title, author=author or APP_NAME, date=date)
@@ -270,7 +286,9 @@ def _title_block(model: Model, check: SafetyCheck, title: str, author: str, date
         ("FECHA", f"{date:%d/%m/%Y}"),
         ("ESTRUCTURA", f"{kind} · {len(model.nodes)} nodos · {len(model.members)} barras"),
         ("MÉTODO", "Rigidez directa · Euler-Bernoulli"),
-        ("CRITERIO", f"{_g('s')} elástica · FS ≥ {check.fs_min:g}"),
+        ("CRITERIO", f"{_g('s')} elástica · FS ≥ {check.fs_min:g}"
+                     + (f" · {_g('d')} ≤ L/{check.deflection_limit_ratio:g}"
+                        if check.deflection_limit_ratio > 0 else "")),
         ("SOFTWARE", APP_NAME),
     ]
     cells = [[_p(k, "meta_k"), _p(v, "meta_v")] for k, v in meta]
@@ -311,6 +329,11 @@ def _section_basis(check: SafetyCheck, figs: _Figures | None, glossary: bool = F
         f"Criterio de verificación: tensión normal elástica en fibra extrema "
         f"{_g('s')} = N/A ± M·c/I; FS = S<sub>y</sub> / {_g('s')}<sub>máx</sub> "
         f"≥ FS<sub>adm</sub> = {check.fs_min:g}.",
+        (f"Criterio de servicio: flecha {_g('d')}<sub>máx</sub> ≤ {_g('d')}<sub>adm</sub> = "
+         f"L/{check.deflection_limit_ratio:g}, con {_g('d')}<sub>máx</sub> el desplazamiento total máximo "
+         f"de la estructura y L = {check.reference_length * _M:.3f} m."
+         if check.deflection_limit_ratio > 0 else
+         "Criterio de servicio: sin límite de flecha (sólo se informa L/δ)."),
     ]
     if glossary:
         items.append("La notación, los símbolos gráficos y los términos usados se detallan en la "
@@ -479,9 +502,21 @@ def _section_verification(check: SafetyCheck) -> list[Flowable]:
         ["Factor de seguridad admisible FS<sub>adm</sub>", f"{check.fs_min:g}"],
         [f"Aprovechamiento {_g('s')}<sub>máx</sub> · FS<sub>adm</sub> / S<sub>y</sub>",
          f"{check.utilization:.0%}"],
+        [f"Flecha máxima {_g('d')}<sub>máx</sub>", f"{check.delta_max:,.2f} mm"],
+        [f"Flecha relativa L/{_g('d')} (L = {check.reference_length * _M:.3f} m)",
+         f"<b>L/{check.deflection_ratio:,.0f}</b>" if math.isfinite(check.deflection_ratio) else "—"],
     ]
+    if check.deflection_limit_ratio > 0:
+        rows += [
+            [f"Flecha admisible {_g('d')}<sub>adm</sub> = L/N",
+             f"L/{check.deflection_limit_ratio:g} = {check.delta_adm:,.2f} mm"],
+            [f"Aprovechamiento {_g('d')}<sub>máx</sub> / {_g('d')}<sub>adm</sub>",
+             f"{check.delta_max / check.delta_adm:.0%}"],
+        ]
+    else:
+        rows.append([f"Flecha admisible {_g('d')}<sub>adm</sub>", "sin límite"])
     v_style = ParagraphStyle("verdict", parent=STYLES["body"], fontSize=11, leading=14, textColor=fg)
-    verdict = Table([[Paragraph(f"<b>VEREDICTO: {VERDICT_TEXT[check.status]}</b>", v_style)]],
+    verdict = Table([[Paragraph(f"<b>VEREDICTO: {_verdict_text(check)}</b>", v_style)]],
                     colWidths=[CONTENT_W])
     verdict.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), bg),
@@ -703,8 +738,7 @@ def _applied_resultant(model: Model) -> tuple[float, float]:
 
 
 def _horizontal_extent(model: Model) -> float:
-    xs = [x for x, _ in model.nodes]
-    return max(xs) - min(xs) or max(model.member_length(m) for m in range(len(model.members)))
+    return default_reference_length(model)
 
 
 # --------------------------------------------------------------------------- #
