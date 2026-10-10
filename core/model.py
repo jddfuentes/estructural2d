@@ -22,6 +22,7 @@ class SupportType(str, Enum):
     FIXED = "empotrado"  # restringe ux, uy, rz
     PINNED = "articulado"  # restringe ux, uy
     ROLLER = "móvil"  # restringe uy (rueda sobre superficie horizontal)
+    FREE = "libre"  # no restringe ningún GDL; permite apoyos elásticos puros
 
     @property
     def restrained_dofs(self) -> tuple[bool, bool, bool]:
@@ -29,6 +30,7 @@ class SupportType(str, Enum):
             SupportType.FIXED: (True, True, True),
             SupportType.PINNED: (True, True, False),
             SupportType.ROLLER: (False, True, False),
+            SupportType.FREE: (False, False, False),
         }[self]
 
 

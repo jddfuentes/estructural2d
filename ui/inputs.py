@@ -254,7 +254,7 @@ def _portal_inputs(material: Material, column: Section, self_weight: bool
     c1, c2 = st.columns(2)
     span = c1.number_input("Luz [m]", min_value=0.5, value=8.0, step=0.5)
     height = c2.number_input("Altura [m]", min_value=0.5, value=4.0, step=0.5)
-    opts = [SupportType.FIXED.value, SupportType.PINNED.value]
+    opts = [SupportType.FIXED.value, SupportType.PINNED.value, SupportType.FREE.value]
     b1, b2 = st.columns(2)
     base_l = SUPPORT_LABELS[b1.selectbox("Base izquierda", opts)]
     base_r = SUPPORT_LABELS[b2.selectbox("Base derecha", opts)]

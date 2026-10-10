@@ -56,7 +56,7 @@ from reportlab.platypus import Image as RLImage
 
 from core.glossary import GRAPHIC_SYMBOLS, NOTATION, TERMS
 from core.materials import FAMILY_NOTES, Material, Section, family_warnings
-from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model, SupportType
+from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model, Spring, SupportType
 from core.solver import MemberResult, Results
 from core.verification import SafetyCheck, Status, default_reference_length
 
@@ -407,7 +407,7 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
                        [0.07, 0.09, 0.17, 0.17, 0.09, 0.09, 0.16, 0.16], num_cols={4, 5}))
 
     # 2.2 Apoyos
-    restr = {"empotrado": "ux, uy, θz", "articulado": "ux, uy", "móvil": "uy"}
+    restr = {"empotrado": "ux, uy, θz", "articulado": "ux, uy", "móvil": "uy", "libre": "—"}
     supports = {s.node: s for s in model.supports}
     springs = {s.node: s for s in model.springs}
     support_nodes = sorted(set(supports) | set(springs))
@@ -425,8 +425,11 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
                 values.append(f"Ky={spring.ky * _KN:g} kN/m")
             if spring.krz > 0:
                 values.append(f"Krz={spring.krz * _KNM:g} kN·m/rad")
-            kind += " + " if support else ""
-            kind += "Elástico: " + ", ".join(values)
+            if support and support.type is SupportType.FREE:
+                kind = "Elástico (" + ", ".join(values) + ")"
+            else:
+                kind += " + " if support else ""
+                kind += "Elástico: " + ", ".join(values)
         rows.append([str(node), f"{model.nodes[node][0] * _M:.3f}", f"{model.nodes[node][1] * _M:.3f}",
                      kind, restricted])
     out.append(KeepTogether([_h2("2.2 Condiciones de apoyo"),
@@ -991,6 +994,8 @@ def _draw_releases(
 
 
 def _draw_support(d: Drawing, p: Pt, kind: SupportType, direction: Pt, u: float = 7.5) -> None:
+    if kind is SupportType.FREE:
+        return
     if kind is SupportType.FIXED:
         dx, dy = direction
         px, py = -dy, dx  # muro perpendicular a la barra, del lado opuesto a ella
@@ -1017,6 +1022,37 @@ def _draw_support(d: Drawing, p: Pt, kind: SupportType, direction: Pt, u: float 
 def _draw_supports(d: Drawing, model: Model, view: _View) -> None:
     for sup in model.supports:
         _draw_support(d, view(*model.nodes[sup.node]), sup.type, _member_dir(model, sup.node))
+    for spring in model.springs:
+        _draw_spring(d, view(*model.nodes[spring.node]), spring)
+
+
+def _draw_spring(d: Drawing, p: Pt, spring: Spring, u: float = 7.5) -> None:
+    """Dibuja resortes nodales y su anclaje sin superponer un símbolo rígido."""
+    if spring.kx > 0:
+        points = [(p[0], p[1]), (p[0] - 2.4 * u, p[1])]
+        _zigzag(d, points, horizontal=True)
+    if spring.ky > 0:
+        points = [(p[0], p[1]), (p[0], p[1] - 2.4 * u)]
+        _zigzag(d, points, horizontal=False)
+        _line(d, (p[0] - u, p[1] - 2.4 * u), (p[0] + u, p[1] - 2.4 * u), C_SUPPORT, 1.0)
+    if spring.krz > 0:
+        d.add(Circle(p[0], p[1], 0.85 * u, fillColor=None, strokeColor=C_SPRING, strokeWidth=1.2))
+
+
+def _zigzag(d: Drawing, points: list[Pt], horizontal: bool) -> None:
+    (x0, y0), (x1, y1) = points
+    axis = np.linspace(0.0, 1.0, 10)
+    transverse = np.array([0.0, 0.35, -0.35, 0.35, -0.35, 0.35, -0.35, 0.35, -0.35, 0.0])
+    if horizontal:
+        for i in range(len(axis) - 1):
+            a = (x0 + (x1 - x0) * float(axis[i]), y0 + transverse[i] * 0.45 * 7.5)
+            b = (x0 + (x1 - x0) * float(axis[i + 1]), y0 + transverse[i + 1] * 0.45 * 7.5)
+            _line(d, a, b, C_SPRING, 1.2)
+    else:
+        for i in range(len(axis) - 1):
+            a = (x0 + transverse[i] * 0.45 * 7.5, y0 + (y1 - y0) * float(axis[i]))
+            b = (x0 + transverse[i + 1] * 0.45 * 7.5, y0 + (y1 - y0) * float(axis[i + 1]))
+            _line(d, a, b, C_SPRING, 1.2)
 
 
 def _load_dir(model: Model, dl: DistributedLoad) -> Pt:
