@@ -100,8 +100,13 @@ def main() -> None:
     with st.expander("Memoria de cálculo (PDF)"):
         report_title = st.text_input("Título", value="Memoria de Cálculo")
         author = st.text_input("Autor", value="")
+        fig_deformed = plot_structure(model, res, inp.deformed_scale)
+        try:
+            img_bytes = fig_deformed.to_image(format="png", width=900, height=350, scale=2)
+        except Exception:
+            img_bytes = None
         pdf = build_pdf_report(model, res, chk, report_title, author,
-                               reference_length=chk.reference_length)
+                               reference_length=chk.reference_length, image_bytes=img_bytes)
         st.download_button("Descargar memoria", data=pdf, file_name=_pdf_filename(report_title),
                            mime="application/pdf")
 
@@ -109,7 +114,7 @@ def main() -> None:
     tabs = st.tabs(["Estructura y deformada", "Momento M", "Corte V", "Normal N", "Tensión σ", "Reacciones",
                     "Predimensionamiento", "Bases teóricas"])
     with tabs[0]:
-        st.plotly_chart(plot_structure(model, res, inp.deformed_scale), width="stretch")
+        st.plotly_chart(fig_deformed, width="stretch")
     with tabs[1]:
         st.plotly_chart(plot_diagram(model, res, "M", inp.moment_tension_side), width="stretch")
     with tabs[2]:

@@ -9,3 +9,4 @@ ruff==0.16.10
 anastruct==1.7.0
 # Lectura de PDF en tests/test_reports.py (verificación del contenido de la memoria)
 pypdf==6.19.0
+kaleido
