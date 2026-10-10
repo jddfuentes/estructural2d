@@ -95,6 +95,26 @@ def test_safety_status(q, status):
     assert check_safety(m, r).status is status
 
 
+@pytest.mark.parametrize("n_stations", [0, 1, -5])
+def test_solve_rejects_too_few_stations(n_stations):
+    """Hallazgo B1: con n < 2 estaciones no hay tramo que muestrear (linspace vacío o de un punto)."""
+    sec, mat = get_section("IPE 200"), MATERIALS["ASTM A36"]
+    m = build_beam(6000.0, [BeamSupport(0, ST.PINNED), BeamSupport(6000.0, ST.ROLLER)], sec, mat,
+                   dist_loads=[BeamDistLoad(0, 6000.0, -10.0, -10.0)])
+    with pytest.raises(ValueError, match="al menos 2"):
+        solve(m, n_stations=n_stations)
+    r = solve(m, n_stations=2)  # mínimo válido: extremos + raíces exactas (M máx en V = 0)
+    assert r.extreme("M").value == pytest.approx(10.0 * 6000.0**2 / 8, rel=1e-6)  # M = qL²/8
+
+
+@pytest.mark.parametrize("fs_min", [0.0, -1.0, float("nan")])
+def test_check_safety_rejects_non_positive_fs_min(fs_min):
+    """Hallazgo O1: FS admisible ≤ 0 haría que toda estructura «verifique» (FS ≥ 0 siempre)."""
+    m, r = _ss_beam("IPE 200", -10.0)
+    with pytest.raises(ValueError, match="estrictamente positivo"):
+        check_safety(m, r, fs_min=fs_min)
+
+
 def test_required_W_roundtrip():
     W = required_section_modulus(45e6, 250.0, 1.5)
     assert W == pytest.approx(270e3)

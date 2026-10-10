@@ -197,10 +197,15 @@ def equivalent_nodal_loads(qx: tuple[float, float], qy: tuple[float, float], L: 
 def solve(model: Model, n_stations: int = 41) -> Results:
     """Resuelve el pórtico plano. Función pura: no modifica `model`.
 
+    `n_stations`: estaciones uniformes por barra para el postproceso (≥ 2: ambos extremos).
+    A ellas se suman siempre las abscisas exactas de M extremo (V = 0) y de flecha extrema.
+
     Raises:
-        ValueError: modelo inconsistente.
+        ValueError: modelo inconsistente o `n_stations` < 2.
         StructuralError: estructura inestable (mecanismo / hipostática).
     """
+    if n_stations < 2:
+        raise ValueError("La cantidad de estaciones debe ser al menos 2.")
     model.validate()
     ndof = model.n_dof
     K = np.zeros((ndof, ndof))
