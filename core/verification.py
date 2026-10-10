@@ -114,7 +114,12 @@ def check_safety(
         reference_length: L para L/δ [mm]; por defecto `default_reference_length(model)`.
 
     Veredicto: FLUENCIA si FS < 1; ALERTA si FS < fs_min o δ_max > L/N; OK si ambos verifican.
+
+    Raises:
+        ValueError: fs_min ≤ 0 (o NaN), N < 0 o L ≤ 0.
     """
+    if not fs_min > 0.0:  # también rechaza NaN
+        raise ValueError("El factor de seguridad admisible debe ser estrictamente positivo.")
     if deflection_limit_ratio < 0.0:
         raise ValueError("El límite de flecha L/N debe ser N ≥ 0 (0 = sin límite).")
     L_ref = default_reference_length(model) if reference_length is None else reference_length
