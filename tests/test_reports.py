@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import datetime as dt
 
@@ -16,6 +17,9 @@ from core.verification import Status, check_safety
 
 MAT = MATERIALS["ASTM A36"]
 DATE = dt.date(2026, 10, 4)
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def _beam(q: float = -10.0, P: float = -20_000.0, section: str = "IPE 200"):
@@ -68,6 +72,13 @@ def test_returns_valid_pdf_bytes():
     assert pdf.startswith(b"%PDF")
     assert pdf.rstrip().endswith(b"%%EOF")
     assert len(pdf) > 2_000
+
+
+@pytest.mark.parametrize("image_bytes", [None, PNG_1X1])
+def test_report_accepts_optional_embedded_plot(image_bytes: bytes | None):
+    m, r, c = _beam()
+    pdf = build_pdf_report(m, r, c, date=DATE, image_bytes=image_bytes)
+    assert pdf.startswith(b"%PDF")
 
 
 @pytest.mark.parametrize("builder", [_beam, _portal])

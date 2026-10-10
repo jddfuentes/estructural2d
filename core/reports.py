@@ -6,7 +6,7 @@ cm³). Las conversiones viven sólo en este módulo y nunca vuelven al resto del
 
 Función pública:
     build_pdf_report(model, results, check, project_title, author, *, date, reference_length,
-                     include_figures) -> bytes
+                     include_figures, image_bytes) -> bytes
 
 Pura: no muta sus argumentos y, con `date` fijo, devuelve exactamente los mismos bytes
 (PDF "invariant": sin marcas de tiempo ni ID aleatorio). Única lectura de disco: las fuentes
@@ -52,6 +52,7 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from reportlab.platypus import Image as RLImage
 
 from core.glossary import GRAPHIC_SYMBOLS, NOTATION, TERMS
 from core.materials import FAMILY_NOTES, Material, Section, family_warnings
@@ -175,6 +176,7 @@ def build_pdf_report(
     reference_length: float | None = None,
     include_figures: bool = True,
     include_glossary: bool = True,
+    image_bytes: bytes | None = None,
 ) -> bytes:
     """Genera la memoria de cálculo y devuelve el PDF como bytes (empieza con b"%PDF").
 
@@ -186,6 +188,7 @@ def build_pdf_report(
             (por defecto, la extensión horizontal de la estructura).
         include_figures: agrega esquema de cargas, deformada y diagramas N-V-M-σ (vectoriales).
         include_glossary: agrega la sección final "Glosario y simbología".
+        image_bytes: imagen PNG opcional del gráfico principal para incrustar en la portada.
     """
     date = date or dt.date.today()
     title = project_title.strip() or "Memoria de Cálculo"
@@ -199,6 +202,8 @@ def build_pdf_report(
     story += _title_block(model, check, title, author, date)
     story += _section_basis(check, figs, include_glossary)
     story += _section_inputs(model, figs)
+    if image_bytes is not None:
+        story += _embedded_plot(image_bytes)
     story += _section_results(model, results, L_ref, figs)
     story += _section_verification(check)
     story += _section_limitations(model)
@@ -206,6 +211,26 @@ def build_pdf_report(
         story += _section_glossary()
     doc.build(story, canvasmaker=_NumberedCanvas)
     return buf.getvalue()
+
+
+def _embedded_plot(image_bytes: bytes) -> list[Flowable]:
+    """Crea el gráfico exportado por Plotly, limitado al área útil de una página A4."""
+    from reportlab.lib.utils import ImageReader
+
+    image_reader = ImageReader(io.BytesIO(image_bytes))
+    pixel_width, pixel_height = image_reader.getSize()
+    aspect = pixel_width / pixel_height
+    max_width = CONTENT_W
+    max_height = 90 * mm
+    width = max_width
+    height = width / aspect
+    if height > max_height:
+        height = max_height
+        width = height * aspect
+    return [
+        RLImage(io.BytesIO(image_bytes), width=width, height=height, hAlign="CENTER"),
+        _p("Gráfico principal: geometría, cargas, elástica deformada y tensiones.", "caption"),
+    ]
 
 
 # --------------------------------------------------------------------------- #
