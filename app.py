@@ -25,7 +25,7 @@ st.set_page_config(page_title="Estructural 2D · Predimensionamiento", page_icon
 
 STATUS_STYLE = {
     Status.OK: ("#15803D", "#DCFCE7", "VERIFICA"),
-    Status.ALERT: ("#B45309", "#FEF3C7", "FS BAJO"),
+    Status.ALERT: ("#B45309", "#FEF3C7", "ALERTA"),
     Status.FAIL: ("#B91C1C", "#FEE2E2", "FLUENCIA"),
 }
 
@@ -73,9 +73,8 @@ def main() -> None:
             st.plotly_chart(plot_structure(model), width="stretch")
         return
 
-    chk = check_safety(model, res, inp.fs_min)
+    chk = check_safety(model, res, inp.fs_min, deflection_limit_ratio=inp.deflection_limit_ratio)
     M, V, N = res.extreme("M"), res.extreme("V"), res.extreme("N")
-    d = res.extreme("deflection")
 
     # ---- Indicadores ------------------------------------------------------- #
     c0, c1, c2, c3, c4 = st.columns([1.3, 1, 1, 1, 1])
@@ -85,22 +84,24 @@ def main() -> None:
     c2.metric("M máx", f"{abs(M.value) / 1e6:.2f} kN·m",
               help=f"Barra {M.member}, x global = {M.point[0] / 1e3:.2f} m")
     c3.metric("V máx", f"{abs(V.value) / 1e3:.2f} kN")
-    ratio = inp.span_mm / abs(d.value) if d.value else float("inf")
-    c4.metric("δ máx", f"{abs(d.value):.2f} mm", help="Desplazamiento total máximo",
+    ratio = chk.deflection_ratio
+    limit_help = (
+        "sin límite de flecha"
+        if inp.deflection_limit_ratio == 0.0
+        else f"límite de servicio L/{inp.deflection_limit_ratio:g}"
+    )
+    c4.metric("δ máx", f"{chk.delta_max:.2f} mm", help=f"Desplazamiento total máximo; {limit_help}",
               delta=f"L/{ratio:,.0f}" if ratio != float("inf") else None, delta_color="off")
 
-    if chk.status is not Status.OK:
-        st.warning(
-            f"FS = {chk.fs:.2f} < {chk.fs_min:g} en barra {chk.member}, punto "
-            f"({chk.point[0] / 1e3:.2f}; {chk.point[1] / 1e3:.2f}) m — σ = {chk.sigma_max:.1f} MPa."
-        )
+    for issue in chk.issues:
+        st.warning(issue)
 
     # ---- Memoria ---------------------------------------------------------- #
     with st.expander("Memoria de cálculo (PDF)"):
         report_title = st.text_input("Título", value="Memoria de Cálculo")
         author = st.text_input("Autor", value="")
         pdf = build_pdf_report(model, res, chk, report_title, author,
-                               reference_length=inp.span_mm)
+                               reference_length=chk.reference_length)
         st.download_button("Descargar memoria", data=pdf, file_name=_pdf_filename(report_title),
                            mime="application/pdf")
 
@@ -137,12 +138,11 @@ def _design_tab(inp: AppInputs) -> None:
         st.info("Elegí una familia del catálogo para buscar el perfil más liviano que verifica.")
         return
     target = "la viga" if inp.kind == "Viga" else "la viga del pórtico (columnas fijas)"
-    c1, c2 = st.columns(2)
-    lim = c1.number_input("Límite de flecha L/…", min_value=0, value=250, step=50,
-                          help="0 = sin límite de flecha")
+    _, c2 = st.columns(2)
     st.write(f"Perfil **{inp.family}** de menor peso para {target} con FS ≥ {inp.fs_min:g}"
-             + (f" y δ ≤ L/{lim}" if lim else "") + ":")
-    sug = suggest_section(inp.builder, inp.family, inp.fs_min, inp.span_mm / lim if lim else None)
+             + (f" y δ ≤ L/{inp.deflection_limit_ratio:g}" if inp.deflection_limit_ratio else "") + ":")
+    sug = suggest_section(inp.builder, inp.family, inp.fs_min,
+                          deflection_limit_ratio=inp.deflection_limit_ratio)
     if sug is None:
         st.error("Ningún perfil de la familia verifica. Probá otra familia o reducí la luz/cargas.")
         return
