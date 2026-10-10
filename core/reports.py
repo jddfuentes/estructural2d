@@ -56,7 +56,7 @@ from reportlab.platypus import Image as RLImage
 
 from core.glossary import GRAPHIC_SYMBOLS, NOTATION, TERMS
 from core.materials import FAMILY_NOTES, Material, Section, family_warnings
-from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model, Spring, SupportType
+from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model, Spring, Support, SupportType
 from core.solver import MemberResult, Results
 from core.verification import SafetyCheck, Status, default_reference_length
 
@@ -71,6 +71,7 @@ APP_NAME = "Estructural 2D"
 _M = 1e-3  # mm -> m
 _KN = 1e-3  # N -> kN
 _KNM = 1e-6  # N·mm -> kN·m
+_KN_M = _KN / _M  # N/mm -> kN/m (= 1: rigidez traslacional de resorte)
 _CM2, _CM3, _CM4 = 1e-2, 1e-3, 1e-4  # mm² -> cm², mm³ -> cm³, mm⁴ -> cm⁴
 
 # --------------------------------------------------------------------------- #
@@ -410,28 +411,12 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
     restr = {"empotrado": "ux, uy, θz", "articulado": "ux, uy", "móvil": "uy", "libre": "—"}
     supports = {s.node: s for s in model.supports}
     springs = {s.node: s for s in model.springs}
-    support_nodes = sorted(set(supports) | set(springs))
     rows = []
-    for node in support_nodes:
+    for node in sorted(set(supports) | set(springs)):
         support = supports.get(node)
-        spring = springs.get(node)
-        kind = support.type.value.capitalize() if support else "Elástico"
         restricted = restr.get(support.type.value, "—") if support else "—"
-        if spring:
-            values = []
-            if spring.kx > 0:
-                values.append(f"Kx={spring.kx * _KN:g} kN/m")
-            if spring.ky > 0:
-                values.append(f"Ky={spring.ky * _KN:g} kN/m")
-            if spring.krz > 0:
-                values.append(f"Krz={spring.krz * _KNM:g} kN·m/rad")
-            if support and support.type is SupportType.FREE:
-                kind = "Elástico (" + ", ".join(values) + ")"
-            else:
-                kind += " + " if support else ""
-                kind += "Elástico: " + ", ".join(values)
         rows.append([str(node), f"{model.nodes[node][0] * _M:.3f}", f"{model.nodes[node][1] * _M:.3f}",
-                     kind, restricted])
+                     _support_label(support, springs.get(node)), restricted])
     out.append(KeepTogether([_h2("2.2 Condiciones de apoyo"),
                              _table(["Nodo", "x [m]", "y [m]", "Tipo", "GDL restringidos"], rows,
                                     [0.10, 0.15, 0.15, 0.25, 0.35], num_cols={1, 2})]))
@@ -504,9 +489,7 @@ def _section_results(model: Model, results: Results, L_ref: float, figs: _Figure
         sx, sy = sx + Rx, sy + Ry
         support = supports.get(node)
         spring = springs.get(node)
-        kind = support.type.value.capitalize() if support else "Elástico"
-        if spring:
-            kind += " + elástico" if support else ""
+        kind = _support_label(support, spring, with_values=False)
         show_mz = (support is not None and support.type.restrained_dofs[2]) or (
             spring is not None and spring.krz > 0
         )
@@ -1023,36 +1006,59 @@ def _draw_supports(d: Drawing, model: Model, view: _View) -> None:
     for sup in model.supports:
         _draw_support(d, view(*model.nodes[sup.node]), sup.type, _member_dir(model, sup.node))
     for spring in model.springs:
-        _draw_spring(d, view(*model.nodes[spring.node]), spring)
+        _draw_spring(d, view(*model.nodes[spring.node]), spring, _spring_side(model, spring.node))
 
 
-def _draw_spring(d: Drawing, p: Pt, spring: Spring, u: float = 7.5) -> None:
-    """Dibuja resortes nodales y su anclaje sin superponer un símbolo rígido."""
+def _spring_side(model: Model, node: int) -> float:
+    """Lado (−1 izquierda, +1 derecha) hacia afuera de la estructura para dibujar el resorte Kx."""
+    xs = [x for x, _ in model.nodes]
+    return -1.0 if model.nodes[node][0] <= 0.5 * (min(xs) + max(xs)) else 1.0
+
+
+def _spring_label(spring: Spring) -> str:
+    """Rigideces no nulas en unidades de ingeniería: Kx, Ky [kN/m]; Krz [kN·m/rad]."""
+    values = [f"{name}={k * f:g} {unit}" for name, k, f, unit in (
+        ("Kx", spring.kx, _KN_M, "kN/m"), ("Ky", spring.ky, _KN_M, "kN/m"),
+        ("Krz", spring.krz, _KNM, "kN·m/rad"),
+    ) if k > 0]
+    return ", ".join(values) or "sin rigidez"
+
+
+def _support_label(support: Support | None, spring: Spring | None, with_values: bool = True) -> str:
+    """Tipo de vínculo de un nodo: rígido, elástico o combinado (`Libre` + resorte = elástico)."""
+    if spring is None:
+        return support.type.value.capitalize() if support is not None else "—"
+    elastic = "Elástico: " + _spring_label(spring) if with_values else "elástico"
+    if support is None or support.type is SupportType.FREE:
+        return elastic[0].upper() + elastic[1:]
+    return f"{support.type.value.capitalize()} + {elastic}"
+
+
+def _draw_spring(d: Drawing, p: Pt, spring: Spring, side: float = -1.0, u: float = 7.5) -> None:
+    """Dibuja los resortes nodales con su anclaje; Kx hacia afuera de la estructura (`side`)."""
     if spring.kx > 0:
-        points = [(p[0], p[1]), (p[0] - 2.4 * u, p[1])]
-        _zigzag(d, points, horizontal=True)
+        x_end = p[0] + side * 2.4 * u
+        _zigzag(d, (p, (x_end, p[1])), horizontal=True, u=u)
+        _line(d, (x_end, p[1] - u), (x_end, p[1] + u), C_SUPPORT, 1.0)
     if spring.ky > 0:
-        points = [(p[0], p[1]), (p[0], p[1] - 2.4 * u)]
-        _zigzag(d, points, horizontal=False)
-        _line(d, (p[0] - u, p[1] - 2.4 * u), (p[0] + u, p[1] - 2.4 * u), C_SUPPORT, 1.0)
+        y_end = p[1] - 2.4 * u
+        _zigzag(d, (p, (p[0], y_end)), horizontal=False, u=u)
+        _line(d, (p[0] - u, y_end), (p[0] + u, y_end), C_SUPPORT, 1.0)
     if spring.krz > 0:
         d.add(Circle(p[0], p[1], 0.85 * u, fillColor=None, strokeColor=C_SPRING, strokeWidth=1.2))
 
 
-def _zigzag(d: Drawing, points: list[Pt], horizontal: bool) -> None:
-    (x0, y0), (x1, y1) = points
+def _zigzag(d: Drawing, ends: tuple[Pt, Pt], horizontal: bool, u: float = 7.5) -> None:
+    """Polilínea en zigzag entre `ends`, con amplitud transversal proporcional a `u`."""
+    (x0, y0), (x1, y1) = ends
     axis = np.linspace(0.0, 1.0, 10)
-    transverse = np.array([0.0, 0.35, -0.35, 0.35, -0.35, 0.35, -0.35, 0.35, -0.35, 0.0])
+    amp = 0.35 * 0.45 * u * np.array([0.0, 1, -1, 1, -1, 1, -1, 1, -1, 0.0])
     if horizontal:
-        for i in range(len(axis) - 1):
-            a = (x0 + (x1 - x0) * float(axis[i]), y0 + transverse[i] * 0.45 * 7.5)
-            b = (x0 + (x1 - x0) * float(axis[i + 1]), y0 + transverse[i + 1] * 0.45 * 7.5)
-            _line(d, a, b, C_SPRING, 1.2)
+        pts = [(x0 + (x1 - x0) * float(t), y0 + float(a)) for t, a in zip(axis, amp, strict=True)]
     else:
-        for i in range(len(axis) - 1):
-            a = (x0 + transverse[i] * 0.45 * 7.5, y0 + (y1 - y0) * float(axis[i]))
-            b = (x0 + transverse[i + 1] * 0.45 * 7.5, y0 + (y1 - y0) * float(axis[i + 1]))
-            _line(d, a, b, C_SPRING, 1.2)
+        pts = [(x0 + float(a), y0 + (y1 - y0) * float(t)) for t, a in zip(axis, amp, strict=True)]
+    for a_pt, b_pt in zip(pts, pts[1:], strict=False):
+        _line(d, a_pt, b_pt, C_SPRING, 1.2)
 
 
 def _load_dir(model: Model, dl: DistributedLoad) -> Pt:

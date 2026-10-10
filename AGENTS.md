@@ -97,6 +97,12 @@ nunca devuelve ni pasa números convertidos al resto del core.
   Reacción del resorte sobre la estructura **R = −k·u** (opuesta al desplazamiento/giro), incluida en
   `Results.reactions[node]` junto con la del `Support` del mismo nudo si lo hay. `Results.reactions`
   trae también los nodos que sólo tienen resorte. Un modelo puede apoyarse sólo en resortes.
+- `SupportType.FREE` (`"libre"`) no restringe ningún GDL (`restrained_dofs = (False, False, False)`):
+  sirve para que la UI declare un apoyo puramente elástico. No se dibuja símbolo rígido; libre sin
+  resorte ⇒ mecanismo (`StructuralError`).
+- Presentación de resortes (UI y PDF): Kx, Ky en kN/m (= N/mm) y Krz en kN·m/rad; rótulo del vínculo
+  `"<rígido> + elástico"`, o `"elástico"` si el nodo es libre o sólo tiene resorte. El resorte Kx se
+  dibuja hacia afuera de la estructura.
 
 Nombres físicos cortos (`E`, `I`, `A`, `L`, `M`, `V`, `N`, `q`) están permitidos y son
 preferidos en fórmulas (E741 deshabilitado en ruff).
@@ -221,17 +227,15 @@ en `local_stiffness`; (3) columna "rótula" en el editor de apoyos; (4) checks.
 ## 9. Alcance del MVP y backlog (fuera de alcance hoy)
 
 Incluido: vigas continuas y voladizos, pórtico simple de una nave, apoyos empotrado /
-articulado / móvil, cargas puntuales, momentos, distribuidas trapezoidales y parciales,
+articulado / móvil / libre, apoyos elásticos (resortes kx, ky, krz), rótulas internas, cargas puntuales, momentos, distribuidas trapezoidales y parciales,
 peso propio, catálogo de perfiles, N-V-M-σ-deformada, FS con alerta < FS mín.,
 búsqueda del perfil más liviano.
 
 Backlog priorizado (no implementar sin tarea explícita):
-1. ~~Rótulas internas~~ → hecho en el core (`Member.release_start/release_end`, `tests/test_hinges.py`);
-   pendiente: exponerlas en la UI y dibujarlas en `ui/plots.py` / PDF (símbolo nuevo → `core/glossary.py`).
-   ~~Apoyos elásticos (resortes)~~ → hecho en el core (`Spring`, `Model.springs`, `tests/test_springs.py`);
-   pendiente: editor de resortes en la UI, símbolo de resorte en `ui/plots.py` / PDF (→ `core/glossary.py`)
-   y listar en la tabla de reacciones de `app.py` / PDF los nodos que sólo tienen resorte (hoy iteran
-   `model.supports`).
+1. ~~Rótulas internas y apoyos elásticos (resortes)~~ → hecho: core (`Member.release_start/release_end`,
+   `Spring`, `Model.springs`, `SupportType.FREE`), UI (editores de rótulas y resortes), gráficos y PDF
+   (símbolos en `core/glossary.py`), tabla de reacciones con nodos elásticos. Tests: `test_hinges.py`,
+   `test_springs.py`, `test_reports.py`, `test_plots.py`, `test_architecture_and_app.py`.
 2. Combinaciones de carga (CIRSOC 301 / AISC 360 LRFD-ASD).
 3. Pandeo flexional de columnas y pandeo lateral-torsional de vigas.
 4. Tensión de corte (τ = VQ/It) y von Mises combinada.
