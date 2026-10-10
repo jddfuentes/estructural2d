@@ -48,6 +48,7 @@ class AppInputs:
     deformed_scale: float | None
     builder: Callable[[Section], Model]  # rearma el modelo con otro perfil (predimensionamiento)
     span_mm: float
+    deflection_limit_ratio: float = 300.0
 
     def model(self) -> Model:
         return self.builder(self.section)
@@ -115,13 +116,18 @@ def sidebar() -> AppInputs:
         st.subheader("Verificación y gráficos")
         fs_min = st.number_input("FS mínimo admisible", min_value=1.0, max_value=5.0,
                                  value=FS_MIN_DEFAULT, step=0.1)
+        deflection_limit_ratio = st.number_input(
+            "Límite de flecha L/…", min_value=0.0, value=300.0, step=50.0,
+            help="0 = sin límite de flecha",
+        )
         tension_side = st.toggle("Momento del lado traccionado", value=True)
         auto = st.toggle("Escala de deformada automática", value=True)
         scale = None if auto else st.number_input("Factor de escala", min_value=1.0, value=100.0, step=10.0)
 
     return AppInputs(kind=kind, material=material, section=section, column_section=column_section,
                      family=family, fs_min=fs_min, moment_tension_side=tension_side,
-                     deformed_scale=scale, builder=builder, span_mm=span)
+                     deformed_scale=scale, builder=builder, span_mm=span,
+                     deflection_limit_ratio=deflection_limit_ratio)
 
 
 def _beam_inputs(material: Material, self_weight: bool) -> tuple[Callable[[Section], Model], float]:

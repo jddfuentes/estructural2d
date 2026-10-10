@@ -108,3 +108,20 @@ def test_app_profile_family_warning(kind, family, has_warning):
         assert any(message in rendered_warnings for message in family_messages)
     else:
         assert not any(message in rendered_warnings for message in family_messages)
+
+
+def test_app_deflection_warning_for_ipe_240_beam():
+    """AppTest: el aviso de servicio se muestra separado del de resistencia."""
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run()
+    at.sidebar.selectbox(key="beam_name").set_value("IPE 240")
+    at.sidebar.number_input[0].set_value(8.0)
+    at.sidebar.checkbox[0].set_value(False)
+    at.run()
+
+    assert not at.exception, [e.message for e in at.exception]
+    warning_text = [warning.value for warning in at.warning]
+    assert any(text.startswith("Servicio") for text in warning_text)
+    assert not any(text.startswith("Resistencia") for text in warning_text)
