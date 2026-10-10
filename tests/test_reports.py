@@ -124,6 +124,12 @@ def test_key_numbers_in_report():
     assert f"L/{6000.0 / d:,.0f}" in text
 
 
+def test_rejects_non_positive_reference_length():
+    m, r, c = _beam()
+    with pytest.raises(ValueError, match="longitud de referencia"):
+        build_pdf_report(m, r, c, date=DATE, reference_length=-500.0)
+
+
 def test_is_pure_and_deterministic():
     m, r, c = _portal()
     m_before = copy.deepcopy(m)

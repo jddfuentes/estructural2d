@@ -8,6 +8,7 @@ from itertools import pairwise
 import pytest
 
 from core.builders import BeamDistLoad, BeamSupport, build_beam, self_weight_q
+from core.design import suggest_section
 from core.materials import (
     CHANNEL_TORSION_WARNING,
     FAMILY_NOTES,
@@ -113,6 +114,11 @@ def test_check_safety_rejects_non_positive_fs_min(fs_min):
     m, r = _ss_beam("IPE 200", -10.0)
     with pytest.raises(ValueError, match="estrictamente positivo"):
         check_safety(m, r, fs_min=fs_min)
+
+
+def test_suggest_section_rejects_unknown_family():
+    with pytest.raises(ValueError, match="Familia 'INEXISTENTE' no válida en el catálogo\\."):
+        suggest_section(lambda _section: _ss_beam("IPE 200", -10.0)[0], "INEXISTENTE", fs_min=1.5)
 
 
 def test_required_W_roundtrip():

@@ -193,14 +193,18 @@ def build_pdf_report(
     date = date or dt.date.today()
     title = project_title.strip() or "Memoria de Cálculo"
     author = author.strip()
-    L_ref = reference_length if reference_length else (check.reference_length or _horizontal_extent(model))
+    if reference_length is not None and reference_length <= 0.0:
+        raise ValueError("La longitud de referencia para la flecha debe ser positiva [mm].")
+    L_ref = reference_length if reference_length is not None else (
+        check.reference_length or _horizontal_extent(model)
+    )
 
     buf = io.BytesIO()
     doc = _Doc(buf, title=title, author=author or APP_NAME, date=date)
     figs = _Figures() if include_figures else None
     story: list[Flowable] = []
     story += _title_block(model, check, title, author, date)
-    story += _section_basis(check, figs, include_glossary)
+    story += _section_basis(check, L_ref, figs, include_glossary)
     story += _section_inputs(model, figs)
     if image_bytes is not None:
         story += _embedded_plot(image_bytes)
@@ -342,7 +346,9 @@ def _title_block(model: Model, check: SafetyCheck, title: str, author: str, date
     ]
 
 
-def _section_basis(check: SafetyCheck, figs: _Figures | None, glossary: bool = False) -> list[Flowable]:
+def _section_basis(
+    check: SafetyCheck, L_ref: float, figs: _Figures | None, glossary: bool = False
+) -> list[Flowable]:
     items = [
         "Análisis elástico lineal de primer orden por el método directo de rigidez; elementos de "
         "pórtico plano Euler-Bernoulli (sin deformación por corte). Solicitaciones y elástica exactas "
@@ -356,7 +362,7 @@ def _section_basis(check: SafetyCheck, figs: _Figures | None, glossary: bool = F
         f"≥ FS<sub>adm</sub> = {check.fs_min:g}.",
         (f"Criterio de servicio: flecha {_g('d')}<sub>máx</sub> ≤ {_g('d')}<sub>adm</sub> = "
          f"L/{check.deflection_limit_ratio:g}, con {_g('d')}<sub>máx</sub> el desplazamiento total máximo "
-         f"de la estructura y L = {check.reference_length * _M:.3f} m."
+         f"de la estructura y L = {L_ref * _M:.3f} m."
          if check.deflection_limit_ratio > 0 else
          "Criterio de servicio: sin límite de flecha (sólo se informa L/δ)."),
     ]

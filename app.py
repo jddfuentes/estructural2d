@@ -104,6 +104,7 @@ def main() -> None:
         try:
             img_bytes = fig_deformed.to_image(format="png", width=900, height=350, scale=2)
         except Exception:
+            st.sidebar.caption("Nota: Gráfico no incrustado en PDF (kaleido no disponible).")
             img_bytes = None
         pdf = build_pdf_report(model, res, chk, report_title, author,
                                reference_length=chk.reference_length, image_bytes=img_bytes)

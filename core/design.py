@@ -39,6 +39,8 @@ def suggest_section(
             `deflection_limit_ratio` (se convierte a N = L / max_deflection con la L del modelo).
         deflection_limit_ratio: N de la flecha admisible L/N (por defecto L/300); 0 = sin límite.
     """
+    if family not in SECTIONS:
+        raise ValueError(f"Familia '{family}' no válida en el catálogo.")
     if max_deflection is not None and max_deflection <= 0.0:
         raise ValueError("La flecha admisible debe ser positiva [mm].")
     for sec in sorted(SECTIONS[family].values(), key=lambda s: s.A):
