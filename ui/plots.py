@@ -119,10 +119,11 @@ def plot_structure(
     ))
     _draw_releases(fig, model, ext)
 
+    support_types = {sup.node: sup.type for sup in model.supports}
     for sup in model.supports:
         _draw_support(fig, model, sup.node, sup.type, s)
     for spring in model.springs:
-        _draw_spring(fig, model, spring, s)
+        _draw_spring(fig, model, spring, s, support_types.get(spring.node))
 
     if show_loads:
         _draw_distributed_loads(fig, model, ext)
@@ -176,6 +177,8 @@ def _draw_support(fig: go.Figure, model: Model, node: int, kind: SupportType, s:
     style = dict(mode="lines", line=dict(color=C_SUPPORT, width=2), hoverinfo="skip", showlegend=False)
     hover = f"Apoyo {kind.value} (nodo {node})"
 
+    if kind is SupportType.FREE:
+        return
     if kind is SupportType.FIXED:
         # Muro perpendicular a la barra, del lado opuesto a ella, con rayado
         dx, dy = _member_dir_at(model, node)
@@ -228,10 +231,18 @@ def _spring_points(start: float, end: float, fixed: float, vertical: bool) -> tu
     return list(axis), list(transverse)
 
 
-def _draw_spring(fig: go.Figure, model: Model, spring: Spring, s: float) -> None:
+def _draw_spring(
+    fig: go.Figure,
+    model: Model,
+    spring: Spring,
+    s: float,
+    support_type: SupportType | None = None,
+) -> None:
     x0, y0 = model.nodes[spring.node]
     style = dict(mode="lines", line=dict(color=C_SPRING, width=2.5), showlegend=False)
     labels: list[str] = []
+    mixed_support = support_type is not None and support_type is not SupportType.FREE
+    offset = 1.5 * s if mixed_support else 0.0
     if spring.kx > 0.0:
         x, y = _spring_points(x0, x0 - 2.4 * s, 0.45 * s, False)
         x = [v + 0.0 for v in x]
@@ -240,8 +251,21 @@ def _draw_spring(fig: go.Figure, model: Model, spring: Spring, s: float) -> None
         labels.append(f"Kx = {spring.kx:g} kN/m")
     if spring.ky > 0.0:
         x, y = _spring_points(y0, y0 - 2.4 * s, 0.45 * s, True)
-        x = [v + x0 for v in x]
+        x = [v + x0 + offset for v in x]
+        if mixed_support:
+            fig.add_trace(go.Scatter(
+                x=np.asarray([x0, x0 + offset]) * M_TO,
+                y=np.full(2, y0 * M_TO),
+                **{**style, "line": dict(color=C_SPRING, width=1.5)},
+            ))
         fig.add_trace(go.Scatter(x=np.asarray(x) * M_TO, y=np.asarray(y) * M_TO, **style))
+        if not mixed_support:
+            ground_y = y0 - 2.4 * s
+            fig.add_trace(go.Scatter(
+                x=np.asarray([x0 - s, x0 + s]) * M_TO,
+                y=np.full(2, ground_y * M_TO),
+                **{**style, "line": dict(color=C_SUPPORT, width=1.5)},
+            ))
         labels.append(f"Ky = {spring.ky:g} kN/m")
     if spring.krz > 0.0:
         angles = np.linspace(-0.3 * math.pi, 1.5 * math.pi, 30)
