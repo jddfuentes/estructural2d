@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import plotly.graph_objects as go
 
-from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model, SupportType
+from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model, Spring, SupportType
 from core.solver import MemberResult, Results
 
 # --------------------------------------------------------------------------- #
@@ -22,6 +22,7 @@ from core.solver import MemberResult, Results
 
 C_MEMBER = "#2B3440"
 C_SUPPORT = "#5B6573"
+C_SPRING = "#B45309"
 C_LOAD = "#C2410C"
 C_LOAD_Q = "#EA580C"
 C_DEFORMED = "#2563EB"
@@ -120,6 +121,8 @@ def plot_structure(
 
     for sup in model.supports:
         _draw_support(fig, model, sup.node, sup.type, s)
+    for spring in model.springs:
+        _draw_spring(fig, model, spring, s)
 
     if show_loads:
         _draw_distributed_loads(fig, model, ext)
@@ -214,6 +217,48 @@ def _draw_support(fig: go.Figure, model: Model, node: int, kind: SupportType, s:
     # Punto invisible para hover
     fig.add_trace(go.Scatter(x=[x0 * M_TO], y=[y0 * M_TO], mode="markers", marker=dict(size=14, opacity=0),
                              hovertemplate=hover + "<extra></extra>", showlegend=False))
+
+
+def _spring_points(start: float, end: float, fixed: float, vertical: bool) -> tuple[list[float], list[float]]:
+    """Devuelve una polilínea de resorte entre el nudo y el anclaje."""
+    axis = np.linspace(start, end, 10)
+    transverse = np.array([0.0, 0.35, -0.35, 0.35, -0.35, 0.35, -0.35, 0.35, -0.35, 0.0]) * fixed
+    if vertical:
+        return list(transverse), list(axis)
+    return list(axis), list(transverse)
+
+
+def _draw_spring(fig: go.Figure, model: Model, spring: Spring, s: float) -> None:
+    x0, y0 = model.nodes[spring.node]
+    style = dict(mode="lines", line=dict(color=C_SPRING, width=2.5), showlegend=False)
+    labels: list[str] = []
+    if spring.kx > 0.0:
+        x, y = _spring_points(x0, x0 - 2.4 * s, 0.45 * s, False)
+        x = [v + 0.0 for v in x]
+        y = [v + y0 for v in y]
+        fig.add_trace(go.Scatter(x=np.asarray(x) * M_TO, y=np.asarray(y) * M_TO, **style))
+        labels.append(f"Kx = {spring.kx:g} kN/m")
+    if spring.ky > 0.0:
+        x, y = _spring_points(y0, y0 - 2.4 * s, 0.45 * s, True)
+        x = [v + x0 for v in x]
+        fig.add_trace(go.Scatter(x=np.asarray(x) * M_TO, y=np.asarray(y) * M_TO, **style))
+        labels.append(f"Ky = {spring.ky:g} kN/m")
+    if spring.krz > 0.0:
+        angles = np.linspace(-0.3 * math.pi, 1.5 * math.pi, 30)
+        radius = 0.85 * s
+        fig.add_trace(go.Scatter(
+            x=(x0 + radius * np.cos(angles)) * M_TO,
+            y=(y0 + radius * np.sin(angles)) * M_TO,
+            **style,
+        ))
+        labels.append(f"Krz = {spring.krz * KNM:g} kN·m/rad")
+    if labels:
+        fig.add_trace(go.Scatter(
+            x=[x0 * M_TO], y=[y0 * M_TO], mode="markers", marker=dict(size=16, opacity=0),
+            customdata=["<br>".join(labels)],
+            hovertemplate=f"Resorte elástico (nodo {spring.node})<br>%{{customdata}}<extra></extra>",
+            showlegend=False,
+        ))
 
 
 def _draw_releases(

@@ -408,8 +408,27 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
 
     # 2.2 Apoyos
     restr = {"empotrado": "ux, uy, θz", "articulado": "ux, uy", "móvil": "uy"}
-    rows = [[str(s.node), f"{model.nodes[s.node][0] * _M:.3f}", f"{model.nodes[s.node][1] * _M:.3f}",
-             s.type.value.capitalize(), restr.get(s.type.value, "—")] for s in model.supports]
+    supports = {s.node: s for s in model.supports}
+    springs = {s.node: s for s in model.springs}
+    support_nodes = sorted(set(supports) | set(springs))
+    rows = []
+    for node in support_nodes:
+        support = supports.get(node)
+        spring = springs.get(node)
+        kind = support.type.value.capitalize() if support else "Elástico"
+        restricted = restr.get(support.type.value, "—") if support else "—"
+        if spring:
+            values = []
+            if spring.kx > 0:
+                values.append(f"Kx={spring.kx * _KN:g} kN/m")
+            if spring.ky > 0:
+                values.append(f"Ky={spring.ky * _KN:g} kN/m")
+            if spring.krz > 0:
+                values.append(f"Krz={spring.krz * _KNM:g} kN·m/rad")
+            kind += " + " if support else ""
+            kind += "Elástico: " + ", ".join(values)
+        rows.append([str(node), f"{model.nodes[node][0] * _M:.3f}", f"{model.nodes[node][1] * _M:.3f}",
+                     kind, restricted])
     out.append(KeepTogether([_h2("2.2 Condiciones de apoyo"),
                              _table(["Nodo", "x [m]", "y [m]", "Tipo", "GDL restringidos"], rows,
                                     [0.10, 0.15, 0.15, 0.25, 0.35], num_cols={1, 2})]))
@@ -475,11 +494,21 @@ def _section_results(model: Model, results: Results, L_ref: float, figs: _Figure
 
     # 3.1 Reacciones + equilibrio global
     rows, sx, sy = [], 0.0, 0.0
-    for s in model.supports:
-        Rx, Ry, Mz = results.reactions[s.node]
+    supports = {s.node: s for s in model.supports}
+    springs = {s.node: s for s in model.springs}
+    for node in sorted(set(supports) | set(springs)):
+        Rx, Ry, Mz = results.reactions[node]
         sx, sy = sx + Rx, sy + Ry
-        rows.append([str(s.node), s.type.value.capitalize(), _num(Rx * _KN), _num(Ry * _KN),
-                     _num(Mz * _KNM) if s.type.restrained_dofs[2] else "—"])
+        support = supports.get(node)
+        spring = springs.get(node)
+        kind = support.type.value.capitalize() if support else "Elástico"
+        if spring:
+            kind += " + elástico" if support else ""
+        show_mz = (support is not None and support.type.restrained_dofs[2]) or (
+            spring is not None and spring.krz > 0
+        )
+        rows.append([str(node), kind, _num(Rx * _KN), _num(Ry * _KN),
+                     _num(Mz * _KNM) if show_mz else "—"])
     rows.append(["<b>Σ</b>", "", f"<b>{_num(sx * _KN)}</b>", f"<b>{_num(sy * _KN)}</b>", ""])
     Fx, Fy = _applied_resultant(model)
     scale = max(abs(Fx), abs(Fy), 1.0)
@@ -614,6 +643,12 @@ def _icon(kind: str, w: float = 54.0, h: float = 26.0) -> Drawing:
     elif kind == "release":
         _line(d, (7.0, h / 2), (w - 7.0, h / 2), C_MEMBER, 2.0)
         d.add(Circle(mid, h / 2, 3.2, fillColor=colors.white, strokeColor=C_MEMBER, strokeWidth=1.1))
+    elif kind == "spring":
+        _line(d, (mid, h - 3.0), (mid, h - 7.0), C_SPRING, 1.4)
+        pts = [(mid + (0.45 * w) * math.sin(i * math.pi / 2.0), h - 7.0 - i * 2.0)
+               for i in range(5)]
+        _poly(d, pts, C_SPRING, 1.4)
+        _line(d, (mid, 4.0), (mid, pts[-1][1]), C_SPRING, 1.4)
     elif kind == "global":
         _draw_triad(d, (mid - 10.0, 3.0), 14.0)
     elif kind == "local":
@@ -790,6 +825,7 @@ C_GHOST = colors.HexColor("#B8C0CA")
 C_SUPPORT = colors.HexColor("#5B6573")
 C_LOAD = colors.HexColor("#C2410C")
 C_LOAD_Q = colors.HexColor("#EA580C")
+C_SPRING = colors.HexColor("#B45309")
 C_DEFORMED = colors.HexColor("#2563EB")
 C_DIM = colors.HexColor("#7B8794")
 C_AXIS = colors.HexColor("#334E68")  # ejes de referencia (globales y locales)
