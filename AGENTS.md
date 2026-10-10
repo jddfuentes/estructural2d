@@ -34,7 +34,7 @@ app.py            Orquestación Streamlit. NO calcula nada.
  ├── ui/plots.py    Model/Results -> go.Figure (sin Streamlit; reutilizable en reportes)
  └── core/          Motor puro. Sin Streamlit, sin Plotly, sin pandas, sin I/O.
       ├── materials.py     Material, Section, catálogo (IPE, IPN, UPN, W, C conformado, caños Sch40, tubos)
-      ├── model.py         Model, Member, Support, NodalLoad, DistributedLoad (dataclasses)
+      ├── model.py         Model, Member, Support, Spring, NodalLoad, DistributedLoad (dataclasses)
       ├── builders.py      build_beam(), build_portal_frame(): definición "de ingeniero" -> Model
       ├── solver.py        solve(model) -> Results  (función pura)
       ├── verification.py  check_safety() -> SafetyCheck (FS, estado OK/ALERTA/FLUENCIA)
@@ -77,6 +77,7 @@ nunca devuelve ni pasa números convertidos al resto del core.
 | Tensión, E | MPa (N/mm²) | MPa |
 | Área / Inercia / W | mm² / mm⁴ / mm³ | cm² / cm⁴ / cm³ |
 | Densidad | kg/m³ | kg/m³ |
+| Rigidez de resorte kx, ky / krz | N/mm / N·mm/rad | kN/m (numéricamente igual) / kN·m/rad (×1e6) |
 
 - Ejes globales: X → derecha, Y ↑ arriba, Mz antihorario +.
 - Cargas en el core: `Fy < 0` y `q < 0` son **hacia abajo**. La UI muestra "+ hacia abajo" y
@@ -90,7 +91,12 @@ nunca devuelve ni pasa números convertidos al resto del core.
   barra (condensación estática local). El momento de un extremo liberado vale `0.0` exacto en
   `MemberResult.M` y `end_forces`. Un nudo donde **todas** las barras concurrentes tienen rótula
   no tiene rigidez a giro: su `rz` se informa 0 (cada barra gira por su cuenta) y un `Mz` aplicado
-  ahí lanza `StructuralError`.
+  ahí lanza `StructuralError` (salvo que el nudo tenga resorte rotacional `krz > 0`).
+- Apoyos elásticos: `Spring(node, kx, ky, krz)` en `Model.springs` (ejes globales, k ≥ 0 finita, un
+  `Spring` por nodo). Se suman a la diagonal de K; un GDL con resorte y sin vínculo rígido es libre.
+  Reacción del resorte sobre la estructura **R = −k·u** (opuesta al desplazamiento/giro), incluida en
+  `Results.reactions[node]` junto con la del `Support` del mismo nudo si lo hay. `Results.reactions`
+  trae también los nodos que sólo tienen resorte. Un modelo puede apoyarse sólo en resortes.
 
 Nombres físicos cortos (`E`, `I`, `A`, `L`, `M`, `V`, `N`, `q`) están permitidos y son
 preferidos en fórmulas (E741 deshabilitado en ruff).
@@ -111,6 +117,7 @@ core.verification.SafetyCheck: .status, .ok, .strength_ok, .issues; ELS: .delta_
                                .deflection_limit_ratio, .deflection_ok, .reference_length, .delta_adm
 core.builders.build_beam(...) / build_portal_frame(...) -> Model
 core.model.Member(i, j, section, material, release_start=False, release_end=False)  # rótulas
+core.model.Spring(node, kx=0.0, ky=0.0, krz=0.0); Model.springs: list[Spring] = []  # resortes
 core.design.suggest_section(build, family, fs_min, max_deflection=None,
                             deflection_limit_ratio=300.0) -> Suggestion | None
 core.materials.SECTIONS[family][name] -> Section             # claves de familia estables (ver abajo)
@@ -221,7 +228,10 @@ búsqueda del perfil más liviano.
 Backlog priorizado (no implementar sin tarea explícita):
 1. ~~Rótulas internas~~ → hecho en el core (`Member.release_start/release_end`, `tests/test_hinges.py`);
    pendiente: exponerlas en la UI y dibujarlas en `ui/plots.py` / PDF (símbolo nuevo → `core/glossary.py`).
-   Apoyos elásticos (resortes): pendiente.
+   ~~Apoyos elásticos (resortes)~~ → hecho en el core (`Spring`, `Model.springs`, `tests/test_springs.py`);
+   pendiente: editor de resortes en la UI, símbolo de resorte en `ui/plots.py` / PDF (→ `core/glossary.py`)
+   y listar en la tabla de reacciones de `app.py` / PDF los nodos que sólo tienen resorte (hoy iteran
+   `model.supports`).
 2. Combinaciones de carga (CIRSOC 301 / AISC 360 LRFD-ASD).
 3. Pandeo flexional de columnas y pandeo lateral-torsional de vigas.
 4. Tensión de corte (τ = VQ/It) y von Mises combinada.

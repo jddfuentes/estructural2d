@@ -10,6 +10,7 @@ from core.model import (
     Member,
     Model,
     NodalLoad,
+    Spring,
     Support,
     SupportType,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "Results",
     "SafetyCheck",
     "Section",
+    "Spring",
     "StructuralError",
     "Support",
     "SupportType",

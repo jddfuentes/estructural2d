@@ -16,6 +16,10 @@ Formulación
   equivalentes condensadas f_c = f_r − k_rc·k_cc⁻¹·f_c (exactas también para carga trapezoidal).
   Un nudo donde TODAS las barras concurrentes están articuladas no tiene rigidez a giro: su GDL
   rz se excluye del sistema y se informa 0 (cada barra gira por su cuenta).
+- Apoyos elásticos (`Model.springs`): kx, ky, krz se suman a la diagonal de K global en los GDL
+  (ux, uy, rz) del nodo. Un GDL con resorte y sin restricción rígida es libre. Reacción del
+  resorte sobre la estructura: R = −k·u, sumada a la del vínculo rígido del mismo nudo (si hay).
+  Un resorte rotacional en un nudo totalmente articulado le devuelve la rigidez a giro.
 
 Convención de signos de solicitaciones (ejes locales de cada barra, x de i a j):
 - N > 0 tracción.
@@ -92,7 +96,8 @@ class Extreme:
 @dataclass(frozen=True, slots=True)
 class Results:
     displacements: FloatArray  # (n_nodos, 3): ux [mm], uy [mm], rz [rad]
-    reactions: dict[int, tuple[float, float, float]]  # nodo -> (Rx [N], Ry [N], Mz [N·mm])
+    # nodo con apoyo rígido y/o resorte -> (Rx [N], Ry [N], Mz [N·mm]); incluye la fuerza −k·u
+    reactions: dict[int, tuple[float, float, float]]
     members: list[MemberResult] = field(default_factory=list)
 
     def extreme(self, quantity: str) -> Extreme:
@@ -296,20 +301,27 @@ def solve(model: Model, n_stations: int = 41) -> Results:
     for p in model.nodal_loads:
         F[3 * p.node : 3 * p.node + 3] += (p.Fx, p.Fy, p.Mz)
 
+    # Apoyos elásticos: rigidez de resorte en la diagonal (GDL desacoplados, ejes globales)
+    k_spring = np.zeros(ndof)
+    for sp in model.springs:
+        k_spring[3 * sp.node : 3 * sp.node + 3] += sp.stiffness
+    K[np.diag_indices(ndof)] += k_spring
+
     # Condiciones de borde
     restrained = np.zeros(ndof, dtype=bool)
     for sup in model.supports:
         restrained[3 * sup.node : 3 * sup.node + 3] = sup.type.restrained_dofs
     free = ~restrained
 
-    # Nudos totalmente articulados: rz sin rigidez -> fuera del sistema (giro nodal informado = 0)
-    hinged = _fully_hinged_nodes(model)
+    # Nudos totalmente articulados: rz sin rigidez -> fuera del sistema (giro nodal informado = 0).
+    # Con resorte rotacional (krz > 0) el giro del nudo sí tiene rigidez y queda en el sistema.
+    hinged = {n for n in _fully_hinged_nodes(model) if k_spring[3 * n + 2] == 0.0}
     for p in model.nodal_loads:
         if p.node in hinged and p.Mz != 0.0:
             raise StructuralError(
                 f"Nodo {p.node}: momento aplicado en un nudo donde todas las barras tienen rótula; "
-                "no hay rigidez a giro que lo resista. Quitar una rótula o aplicar el momento en "
-                "un nudo con alguna barra continua."
+                "no hay rigidez a giro que lo resista. Quitar una rótula, aplicar el momento en "
+                "un nudo con alguna barra continua o agregar un resorte rotacional (krz) en el nudo."
             )
     for n in hinged:
         free[3 * n + 2] = False
@@ -328,11 +340,18 @@ def solve(model: Model, n_stations: int = 41) -> Results:
                 "Ej.: viga con un solo apoyo, o sólo apoyos móviles sin restricción horizontal."
             )
         U[free] = d * np.linalg.solve(Ks, d * F[free])
-    R = K @ U - F
+    # Reacciones sobre la estructura. Vínculo rígido: K·U − F (K incluye resortes, pero u = 0 ahí).
+    # GDL libre con resorte: R = −k·u (opuesta al desplazamiento), asignada exacta; equivale a
+    # K_barras·U − F salvo el residuo de la solución, así que ΣR + ΣF = 0 se cumple al redondeo.
+    R = K @ U - F - k_spring * U
+    spring_free = free & (k_spring > 0.0)
+    R[spring_free] = -k_spring[spring_free] * U[spring_free]
 
+    support_nodes = [sup.node for sup in model.supports]
+    spring_nodes = [sp.node for sp in model.springs if sp.node not in support_nodes]
     reactions = {
-        sup.node: (float(R[3 * sup.node]), float(R[3 * sup.node + 1]), float(R[3 * sup.node + 2]))
-        for sup in model.supports
+        n: (float(R[3 * n]), float(R[3 * n + 1]), float(R[3 * n + 2]))
+        for n in support_nodes + spring_nodes
     }
 
     members = [

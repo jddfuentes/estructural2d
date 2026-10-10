@@ -5,6 +5,8 @@ antihorario positivo. Unidades: mm, N, N/mm, N·mm.
 
 Cada nodo tiene 3 GDL: (ux, uy, rz). Las barras son elementos de pórtico
 Euler-Bernoulli con rigidez axial y a flexión, opcionalmente con rótulas en sus extremos.
+
+Vínculos: rígidos (`Support`) y/o elásticos (`Spring`: resortes nodales kx, ky, krz).
 """
 
 from __future__ import annotations
@@ -62,6 +64,37 @@ class Support:
 
 
 @dataclass(frozen=True, slots=True)
+class Spring:
+    """Apoyo elástico: resortes nodales desacoplados según los ejes globales.
+
+    Cada resorte actúa sobre la estructura con R = −k·u en su GDL (fuerza o momento opuesto al
+    desplazamiento o giro del nodo). k = 0 ⇒ sin resorte en ese GDL. Un GDL con resorte y sin
+    restricción rígida es un GDL libre: entra al sistema de ecuaciones.
+    Si el nodo además tiene un `Support`, en los GDL restringidos rígidamente el resorte no
+    trabaja (u = 0) y la reacción es la del vínculo rígido (p. ej. articulado + krz = empotramiento
+    elástico).
+    """
+
+    node: int
+    kx: float = 0.0  # [N/mm] rigidez traslacional según X global
+    ky: float = 0.0  # [N/mm] rigidez traslacional según Y global
+    krz: float = 0.0  # [N·mm/rad] rigidez rotacional (giro Z, antihorario +)
+
+    def __post_init__(self) -> None:
+        for name, k in (("kx", self.kx), ("ky", self.ky), ("krz", self.krz)):
+            if not (math.isfinite(k) and k >= 0.0):
+                raise ValueError(
+                    f"Resorte en nodo {self.node}: {name} = {k} no es válida; la rigidez debe ser "
+                    "un número finito ≥ 0 (kx, ky en N/mm; krz en N·mm/rad)."
+                )
+
+    @property
+    def stiffness(self) -> tuple[float, float, float]:
+        """(kx [N/mm], ky [N/mm], krz [N·mm/rad]) en el orden de los GDL (ux, uy, rz)."""
+        return (self.kx, self.ky, self.krz)
+
+
+@dataclass(frozen=True, slots=True)
 class NodalLoad:
     """Carga concentrada en nodo, ejes globales. Fy < 0 = hacia abajo."""
 
@@ -96,6 +129,7 @@ class Model:
     supports: list[Support] = field(default_factory=list)
     nodal_loads: list[NodalLoad] = field(default_factory=list)
     distributed_loads: list[DistributedLoad] = field(default_factory=list)
+    springs: list[Spring] = field(default_factory=list)  # apoyos elásticos (resortes nodales)
 
     @property
     def n_dof(self) -> int:
@@ -122,8 +156,8 @@ class Model:
         n = len(self.nodes)
         if n < 2 or not self.members:
             raise ValueError("El modelo necesita al menos 2 nodos y 1 barra.")
-        if not self.supports:
-            raise ValueError("El modelo no tiene apoyos.")
+        if not self.supports and not self.springs:
+            raise ValueError("El modelo no tiene apoyos (ni rígidos ni elásticos).")
         for k, mem in enumerate(self.members):
             if not (0 <= mem.i < n and 0 <= mem.j < n) or mem.i == mem.j:
                 raise ValueError(f"Barra {k}: nodos inválidos ({mem.i}, {mem.j}).")
@@ -138,6 +172,15 @@ class Model:
             if s.node in seen:
                 raise ValueError(f"Nodo {s.node} con más de un apoyo.")
             seen.add(s.node)
+        seen_springs: set[int] = set()
+        for sp in self.springs:
+            if not 0 <= sp.node < n:
+                raise ValueError(f"Resorte en nodo inexistente: {sp.node}.")
+            if sp.node in seen_springs:
+                raise ValueError(
+                    f"Nodo {sp.node} con más de un resorte: definir kx, ky y krz en un único `Spring`."
+                )
+            seen_springs.add(sp.node)
         for p in self.nodal_loads:
             if not 0 <= p.node < n:
                 raise ValueError(f"Carga en nodo inexistente: {p.node}.")
