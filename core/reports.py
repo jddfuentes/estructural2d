@@ -395,11 +395,16 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
     for m, mem in enumerate(model.members):
         (x1, y1), (x2, y2) = model.nodes[mem.i], model.nodes[mem.j]
         ang = math.degrees(math.atan2(y2 - y1, x2 - x1))
+        articulation = " / ".join(
+            label for label, enabled in (("Art. inicio", mem.release_start), ("Art. fin", mem.release_end))
+            if enabled
+        ) or "—"
         rows.append([str(m), f"{mem.i} → {mem.j}", f"({x1 * _M:.3f}; {y1 * _M:.3f})",
                      f"({x2 * _M:.3f}; {y2 * _M:.3f})", f"{model.member_length(m) * _M:.3f}",
-                     f"{ang:.1f}", escape(mem.section.name)])
+                     f"{ang:.1f}", articulation, escape(mem.section.name)])
     out.append(_table(["Barra", "Nodos", "Inicio (x; y) [m]", "Fin (x; y) [m]", "L [m]", "Áng. [°]",
-                       "Sección"], rows, [0.08, 0.10, 0.18, 0.18, 0.10, 0.10, 0.26], num_cols={4, 5}))
+                       "Articulaciones", "Sección"], rows,
+                       [0.07, 0.09, 0.17, 0.17, 0.09, 0.09, 0.16, 0.16], num_cols={4, 5}))
 
     # 2.2 Apoyos
     restr = {"empotrado": "ux, uy, θz", "articulado": "ux, uy", "móvil": "uy"}
@@ -606,6 +611,9 @@ def _icon(kind: str, w: float = 54.0, h: float = 26.0) -> Drawing:
         _poly(d, arc[:-2], C_LOAD, 1.3)
         _arrow(d, arc[-4], arc[-1], C_LOAD, 1.3, 4.5)
         d.add(Circle(mid, h / 2, 1.3, fillColor=C_MEMBER, strokeColor=None))
+    elif kind == "release":
+        _line(d, (7.0, h / 2), (w - 7.0, h / 2), C_MEMBER, 2.0)
+        d.add(Circle(mid, h / 2, 3.2, fillColor=colors.white, strokeColor=C_MEMBER, strokeWidth=1.1))
     elif kind == "global":
         _draw_triad(d, (mid - 10.0, 3.0), 14.0)
     elif kind == "local":
@@ -916,6 +924,36 @@ def _draw_members(d: Drawing, model: Model, view: _View, color: colors.Color = C
         _line(d, view(*model.nodes[mem.i]), view(*model.nodes[mem.j]), color, width)
 
 
+def _draw_releases(
+    d: Drawing,
+    model: Model,
+    view: _View,
+    results: Results | None = None,
+    scale: float = 0.0,
+) -> None:
+    """Dibuja articulaciones de extremo como círculos abiertos desplazados hacia la barra."""
+    for index, mem in enumerate(model.members):
+        if not (mem.release_start or mem.release_end):
+            continue
+        if results is None:
+            a, b = model.nodes[mem.i], model.nodes[mem.j]
+        else:
+            mr = results.members[index]
+            a = tuple(mr.points[0] + scale * mr.displacement[0])
+            b = tuple(mr.points[-1] + scale * mr.displacement[-1])
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length = math.hypot(dx, dy)
+        if length <= 0:
+            continue
+        offset = min(2.8, 0.08 * length)
+        ux, uy = dx / length, dy / length
+        for point, enabled, sign in ((a, mem.release_start, 1.0), (b, mem.release_end, -1.0)):
+            if enabled:
+                x, y = point[0] + sign * offset * ux, point[1] + sign * offset * uy
+                d.add(Circle(x * 1.0, y * 1.0, 2.8, fillColor=colors.white,
+                             strokeColor=C_MEMBER, strokeWidth=1.1))
+
+
 def _draw_support(d: Drawing, p: Pt, kind: SupportType, direction: Pt, u: float = 7.5) -> None:
     if kind is SupportType.FIXED:
         dx, dy = direction
@@ -1183,6 +1221,7 @@ def _fig_structure(model: Model, w: float) -> Drawing:
     d = Drawing(w, h)
     view = _fit(model.nodes, w, h, pad)
     _draw_members(d, model, view)
+    _draw_releases(d, model, view)
     _draw_supports(d, model, view)
     _draw_dist_loads(d, model, view)
     _draw_nodal_loads(d, model, view)
@@ -1222,6 +1261,7 @@ def _fig_deformed(model: Model, results: Results, w: float) -> tuple[Drawing, fl
     d = Drawing(w, h)
     view = _fit(pts, w, h, pad)
     _draw_members(d, model, view, C_GHOST, 1.2)
+    _draw_releases(d, model, view, results, k)
     _draw_supports(d, model, view)
     _draw_triad(d, (8.0, 8.0), 13.0, moment=False)
     for arr in deformed:

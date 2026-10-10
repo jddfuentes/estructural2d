@@ -116,6 +116,7 @@ def plot_structure(
         customdata=list(range(len(model.nodes))),
         hovertemplate="Nodo %{customdata}<br>x = %{x:.3f} m<br>y = %{y:.3f} m<extra></extra>",
     ))
+    _draw_releases(fig, model, ext)
 
     for sup in model.supports:
         _draw_support(fig, model, sup.node, sup.type, s)
@@ -213,6 +214,46 @@ def _draw_support(fig: go.Figure, model: Model, node: int, kind: SupportType, s:
     # Punto invisible para hover
     fig.add_trace(go.Scatter(x=[x0 * M_TO], y=[y0 * M_TO], mode="markers", marker=dict(size=14, opacity=0),
                              hovertemplate=hover + "<extra></extra>", showlegend=False))
+
+
+def _draw_releases(
+    fig: go.Figure,
+    model: Model,
+    ext: float,
+    results: Results | None = None,
+    deformed_scale: float = 0.0,
+) -> None:
+    """Dibuja rótulas por barra, desplazándolas hacia el interior del elemento."""
+    points: list[tuple[float, float]] = []
+    inset = 0.018 * ext
+    for index, mem in enumerate(model.members):
+        (x1, y1), (x2, y2) = model.nodes[mem.i], model.nodes[mem.j]
+        if results is None:
+            ends = ((x1, y1), (x2, y2))
+        else:
+            mr = results.members[index]
+            ends = (
+                (float(mr.points[0, 0] + deformed_scale * mr.displacement[0, 0]),
+                 float(mr.points[0, 1] + deformed_scale * mr.displacement[0, 1])),
+                (float(mr.points[-1, 0] + deformed_scale * mr.displacement[-1, 0]),
+                 float(mr.points[-1, 1] + deformed_scale * mr.displacement[-1, 1])),
+            )
+        length = math.hypot(ends[1][0] - ends[0][0], ends[1][1] - ends[0][1])
+        if length <= 0:
+            continue
+        ux = (ends[1][0] - ends[0][0]) / length
+        uy = (ends[1][1] - ends[0][1]) / length
+        offset = min(inset, 0.08 * length)
+        if mem.release_start:
+            points.append((ends[0][0] + ux * offset, ends[0][1] + uy * offset))
+        if mem.release_end:
+            points.append((ends[1][0] - ux * offset, ends[1][1] - uy * offset))
+    if points:
+        fig.add_trace(go.Scatter(
+            x=[p[0] * M_TO for p in points], y=[p[1] * M_TO for p in points],
+            mode="markers", marker=dict(symbol="circle-open", size=9, color=C_MEMBER, line=dict(width=2)),
+            name="Rótula interna", hovertemplate="Rótula interna<extra></extra>",
+        ))
 
 
 def _arrow(fig: go.Figure, head: tuple[float, float], tail: tuple[float, float], color: str,
@@ -343,6 +384,7 @@ def _draw_deformed(fig: go.Figure, model: Model, results: Results, ext: float,
         dtot += list(mr.deflection)
     fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=C_DEFORMED, width=2, dash="dash"),
                              name=f"Deformada (×{k:,.0f})", hoverinfo="skip"))
+    _draw_releases(fig, model, ext, results, k)
     if color_by_stress:
         fig.add_trace(go.Scatter(
             x=px, y=py, mode="markers", name="|σ| [MPa]",

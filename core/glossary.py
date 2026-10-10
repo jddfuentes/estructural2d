@@ -169,6 +169,10 @@ GRAPHIC_SYMBOLS: tuple[GraphicSymbol, ...] = (
         "moment", "Momento aplicado", "Momento concentrado en un nodo; la flecha indica el sentido de giro."
     ),
     GraphicSymbol(
+        "release", "Rótula interna",
+        "Articulación de extremo que libera el momento flector de la barra (Mz = 0)."
+    ),
+    GraphicSymbol(
         "global", "Ejes globales", "Terna X-Y de referencia y sentido positivo de M_{z} (antihorario)."
     ),
     GraphicSymbol(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import copy
 import datetime as dt
+from dataclasses import replace
 
 import pytest
 
@@ -72,6 +73,14 @@ def test_returns_valid_pdf_bytes():
     assert pdf.startswith(b"%PDF")
     assert pdf.rstrip().endswith(b"%%EOF")
     assert len(pdf) > 2_000
+
+
+def test_report_with_internal_releases_returns_valid_pdf():
+    """Las rótulas de extremo se incluyen en geometría y simbología sin invalidar el PDF."""
+    m, r, c = _beam(P=0.0)
+    m.members[0] = replace(m.members[0], release_end=True)
+    m.members[1] = replace(m.members[1], release_start=True)
+    assert build_pdf_report(m, r, c, date=DATE).startswith(b"%PDF")
 
 
 @pytest.mark.parametrize("image_bytes", [None, PNG_1X1])

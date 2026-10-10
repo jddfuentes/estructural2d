@@ -4,7 +4,7 @@ Sistema global: X horizontal a la derecha, Y vertical hacia arriba, giro Z
 antihorario positivo. Unidades: mm, N, N/mm, N·mm.
 
 Cada nodo tiene 3 GDL: (ux, uy, rz). Las barras son elementos de pórtico
-Euler-Bernoulli con rigidez axial y a flexión.
+Euler-Bernoulli con rigidez axial y a flexión, opcionalmente con rótulas en sus extremos.
 """
 
 from __future__ import annotations
@@ -38,10 +38,21 @@ class LoadDirection(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class Member:
+    """Barra de pórtico Euler-Bernoulli del nodo `i` al nodo `j`.
+
+    Rótulas internas: `release_start` / `release_end` liberan el momento flector Mz en el
+    extremo i / j de la barra (M = 0 en ese extremo; el giro de la barra queda desacoplado
+    del giro del nudo). Por defecto ambas en False: unión rígida continua (comportamiento
+    previo). Con ambas en True la barra es una biela: a los nudos sólo transmite axil y el
+    corte isostático de su propia carga transversal (trabaja como viga simplemente apoyada).
+    """
+
     i: int  # nodo inicial
     j: int  # nodo final
     section: Section
     material: Material
+    release_start: bool = False  # rótula (Mz = 0) en el nodo i
+    release_end: bool = False  # rótula (Mz = 0) en el nodo j
 
 
 @dataclass(frozen=True, slots=True)
