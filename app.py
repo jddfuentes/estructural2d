@@ -13,7 +13,7 @@ import streamlit as st
 
 from core.design import suggest_section
 from core.materials import family_warnings
-from core.model import Model
+from core.model import Model, SupportType
 from core.reports import build_pdf_report
 from core.solver import Results, StructuralError, solve
 from core.verification import SafetyCheck, Status, check_safety
@@ -49,12 +49,18 @@ def fs_badge(chk: SafetyCheck) -> None:
 
 
 def reactions_table(model: Model, res: Results) -> pd.DataFrame:
+    """Reacciones de apoyos rígidos y de resortes (incluye nodos sólo con resorte)."""
+    supports = {sup.node: sup.type for sup in model.supports}
+    springs = {sp.node for sp in model.springs}
     rows = []
-    for sup in model.supports:
-        Rx, Ry, Mz = res.reactions[sup.node]
-        x, y = model.nodes[sup.node]
-        rows.append({"Nodo": sup.node, "Tipo": sup.type.value, "x [m]": x / 1e3, "y [m]": y / 1e3,
-                     "Rx [kN]": Rx / 1e3, "Ry [kN]": Ry / 1e3, "Mz [kN·m]": Mz / 1e6})
+    for node, (Rx, Ry, Mz) in res.reactions.items():
+        kind = supports.get(node)
+        tipo = kind.value if kind is not None and kind is not SupportType.FREE else ""
+        if node in springs:
+            tipo = f"{tipo} + elástico" if tipo else "elástico"
+        x, y = model.nodes[node]
+        rows.append({"Nodo": node, "Tipo": tipo or SupportType.FREE.value, "x [m]": x / 1e3,
+                     "y [m]": y / 1e3, "Rx [kN]": Rx / 1e3, "Ry [kN]": Ry / 1e3, "Mz [kN·m]": Mz / 1e6})
     return pd.DataFrame(rows)
 
 
