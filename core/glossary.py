@@ -95,6 +95,13 @@ NOTATION: tuple[Group, ...] = (
         ),
     ),
     Group(
+        "Apoyos elásticos",
+        (
+            Entry("K_{x}, K_{y}", "Rigidez de resorte traslacional según los ejes globales X e Y.", "kN/m"),
+            Entry("K_{rz}", "Rigidez de resorte al giro nodal θ_{z}.", "kN·m/rad"),
+        ),
+    ),
+    Group(
         "Solicitaciones",
         (
             Entry("N", "Esfuerzo normal; positivo de tracción.", "kN"),
@@ -157,6 +164,10 @@ GRAPHIC_SYMBOLS: tuple[GraphicSymbol, ...] = (
     GraphicSymbol("fixed", "Empotrado", "Apoyo que restringe u_{x}, u_{y} y θ_{z} (traslaciones y giro)."),
     GraphicSymbol("pinned", "Articulado", "Apoyo que restringe u_{x} y u_{y}; permite el giro."),
     GraphicSymbol("roller", "Móvil", "Apoyo que restringe sólo u_{y}; permite desplazamiento en X y giro."),
+    GraphicSymbol(
+        "spring", "Resorte elástico",
+        "Apoyo nodal con rigidez K_{x}, K_{y} o K_{rz}; la reacción es opuesta al desplazamiento.",
+    ),
     GraphicSymbol(
         "point", "Carga concentrada", "Fuerza aplicada en un nodo; la flecha indica su sentido real."
     ),

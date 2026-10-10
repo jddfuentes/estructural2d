@@ -26,7 +26,7 @@ from core.materials import (
     custom,
     family_warnings,
 )
-from core.model import Model, SupportType
+from core.model import Model, Spring, SupportType
 from core.verification import FS_MIN_DEFAULT
 
 M = 1e3  # m -> mm
@@ -117,6 +117,13 @@ def _apply_member_releases(model: Model, releases: pd.DataFrame) -> Model:
     return model
 
 
+def _spring_if_present(node: int, kx: float, ky: float, krz: float) -> Spring | None:
+    """Construye un resorte sólo cuando alguna rigidez fue asignada en la UI."""
+    if kx == 0.0 and ky == 0.0 and krz == 0.0:
+        return None
+    return Spring(node, kx=kx, ky=ky, krz=krz)
+
+
 def sidebar() -> AppInputs:
     sb = st.sidebar
     with sb:
@@ -165,10 +172,21 @@ def _beam_inputs(material: Material, self_weight: bool) -> tuple[Callable[[Secti
 
     st.markdown("**Apoyos**")
     sup_df = _editor(
-        pd.DataFrame({"x [m]": [0.0, L], "Tipo": [SupportType.PINNED.value, SupportType.ROLLER.value]}),
+        pd.DataFrame({
+            "x [m]": [0.0, L],
+            "Tipo": [SupportType.PINNED.value, SupportType.ROLLER.value],
+            "Kx [kN/m]": [0.0, 0.0],
+            "Ky [kN/m]": [0.0, 0.0],
+            "Krz [kN·m/rad]": [0.0, 0.0],
+        }),
         "supports",
-        {"x [m]": st.column_config.NumberColumn(min_value=0.0, max_value=L, step=0.1, format="%.3f"),
-         "Tipo": st.column_config.SelectboxColumn(options=list(SUPPORT_LABELS), required=True)},
+        {
+            "x [m]": st.column_config.NumberColumn(min_value=0.0, max_value=L, step=0.1, format="%.3f"),
+            "Tipo": st.column_config.SelectboxColumn(options=list(SUPPORT_LABELS), required=True),
+            "Kx [kN/m]": st.column_config.NumberColumn(min_value=0.0, step=100.0, format="%.1f"),
+            "Ky [kN/m]": st.column_config.NumberColumn(min_value=0.0, step=100.0, format="%.1f"),
+            "Krz [kN·m/rad]": st.column_config.NumberColumn(min_value=0.0, step=10.0, format="%.1f"),
+        },
     )
     st.markdown("**Cargas puntuales**")
     pl_df = _editor(
@@ -196,8 +214,19 @@ def _beam_inputs(material: Material, self_weight: bool) -> tuple[Callable[[Secti
         "beam_member_releases",
     )
 
-    supports = [BeamSupport(float(r["x [m]"]) * M, SUPPORT_LABELS[str(r["Tipo"])])
-                for _, r in sup_df.iterrows()]
+    supports = [
+        BeamSupport(float(r["x [m]"]) * M, SUPPORT_LABELS[str(r["Tipo"])])
+        for _, r in sup_df.iterrows()
+    ]
+    spring_inputs = [
+        (
+            float(r["x [m]"]) * M,
+            float(r["Kx [kN/m]"]),
+            float(r["Ky [kN/m]"]),
+            float(r["Krz [kN·m/rad]"]),
+        )
+        for _, r in sup_df.iterrows()
+    ]
     point_loads = [
         BeamPointLoad(float(r["x [m]"]) * M, Fy=-float(r["P [kN] ↓"]) * KN, Mz=float(r["M [kN·m] ↺"]) * KNM)
         for _, r in pl_df.iterrows()
@@ -210,6 +239,11 @@ def _beam_inputs(material: Material, self_weight: bool) -> tuple[Callable[[Secti
 
     def builder(sec: Section) -> Model:
         model = build_beam(L * M, supports, sec, material, point_loads, dist_loads, self_weight)
+        for x, kx, ky, krz in spring_inputs:
+            node = min(range(len(model.nodes)), key=lambda i: abs(model.nodes[i][0] - x))
+            spring = _spring_if_present(node, kx, ky, krz * KNM)
+            if spring is not None:
+                model.springs.append(spring)
         return _apply_member_releases(model, release_df)
 
     return builder, L * M
@@ -224,6 +258,19 @@ def _portal_inputs(material: Material, column: Section, self_weight: bool
     b1, b2 = st.columns(2)
     base_l = SUPPORT_LABELS[b1.selectbox("Base izquierda", opts)]
     base_r = SUPPORT_LABELS[b2.selectbox("Base derecha", opts)]
+    st.markdown("**Resortes nodales en las bases**")
+    kx_l, ky_l, krz_l = st.columns(3)
+    kx_r, ky_r, krz_r = st.columns(3)
+    left_spring = (
+        kx_l.number_input("Kx izq. [kN/m]", min_value=0.0, step=100.0, key="portal_kx_l"),
+        ky_l.number_input("Ky izq. [kN/m]", min_value=0.0, step=100.0, key="portal_ky_l"),
+        krz_l.number_input("Krz izq. [kN·m/rad]", min_value=0.0, step=10.0, key="portal_krz_l"),
+    )
+    right_spring = (
+        kx_r.number_input("Kx der. [kN/m]", min_value=0.0, step=100.0, key="portal_kx_r"),
+        ky_r.number_input("Ky der. [kN/m]", min_value=0.0, step=100.0, key="portal_ky_r"),
+        krz_r.number_input("Krz der. [kN·m/rad]", min_value=0.0, step=10.0, key="portal_krz_r"),
+    )
     q = st.number_input("q sobre la viga [kN/m] ↓", value=12.0, step=1.0)
     H = st.number_input("Carga lateral en nudo sup. izq. [kN] →", value=10.0, step=1.0)
     st.markdown("**Cargas puntuales sobre la viga**")
@@ -243,6 +290,10 @@ def _portal_inputs(material: Material, column: Section, self_weight: bool
         model = build_portal_frame(span * M, height * M, column, sec, material, base_l, base_r,
                                    beam_q=-q, lateral_load=H * KN, beam_point_loads=point_loads,
                                    self_weight=self_weight)
+        for node, values in ((0, left_spring), (3, right_spring)):
+            spring = _spring_if_present(node, values[0], values[1], values[2] * KNM)
+            if spring is not None:
+                model.springs.append(spring)
         return _apply_member_releases(model, release_df)
 
     return builder, span * M
