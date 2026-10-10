@@ -86,6 +86,11 @@ nunca devuelve ni pasa números convertidos al resto del core.
   (en vigas horizontales: fibra inferior, "sagging"); **V = dM/dx**.
 - Tensiones: `sigma_top = N/A − M·c_top/I`, `sigma_bot = N/A + M·c_bot/I`.
 - Reacciones: en ejes globales, sobre la estructura.
+- Rótulas internas: `Member.release_start` / `release_end` = M = 0 en el extremo i / j de esa
+  barra (condensación estática local). El momento de un extremo liberado vale `0.0` exacto en
+  `MemberResult.M` y `end_forces`. Un nudo donde **todas** las barras concurrentes tienen rótula
+  no tiene rigidez a giro: su `rz` se informa 0 (cada barra gira por su cuenta) y un `Mz` aplicado
+  ahí lanza `StructuralError`.
 
 Nombres físicos cortos (`E`, `I`, `A`, `L`, `M`, `V`, `N`, `q`) están permitidos y son
 preferidos en fórmulas (E741 deshabilitado en ruff).
@@ -105,6 +110,7 @@ core.verification.check_safety(model, results, fs_min=1.5, deflection_limit_rati
 core.verification.SafetyCheck: .status, .ok, .strength_ok, .issues; ELS: .delta_max, .deflection_ratio,
                                .deflection_limit_ratio, .deflection_ok, .reference_length, .delta_adm
 core.builders.build_beam(...) / build_portal_frame(...) -> Model
+core.model.Member(i, j, section, material, release_start=False, release_end=False)  # rótulas
 core.design.suggest_section(build, family, fs_min, max_deflection=None,
                             deflection_limit_ratio=300.0) -> Suggestion | None
 core.materials.SECTIONS[family][name] -> Section             # claves de familia estables (ver abajo)
@@ -202,7 +208,7 @@ Mensajes en castellano y accionables (la UI los muestra tal cual).
    mismo commit. Un cambio de convención sin actualizar AGENTS.md se rechaza.
 
 Ejemplo — agregar rótulas internas: (1) test viga Gerber con M = 0 en la rótula;
-(2) campo `release_i/release_j: bool = False` al final de `Member`; condensación estática
+(2) campo `release_start/release_end: bool = False` al final de `Member`; condensación estática
 en `local_stiffness`; (3) columna "rótula" en el editor de apoyos; (4) checks.
 
 ## 9. Alcance del MVP y backlog (fuera de alcance hoy)
@@ -213,7 +219,9 @@ peso propio, catálogo de perfiles, N-V-M-σ-deformada, FS con alerta < FS mín.
 búsqueda del perfil más liviano.
 
 Backlog priorizado (no implementar sin tarea explícita):
-1. Rótulas internas y apoyos elásticos (resortes).
+1. ~~Rótulas internas~~ → hecho en el core (`Member.release_start/release_end`, `tests/test_hinges.py`);
+   pendiente: exponerlas en la UI y dibujarlas en `ui/plots.py` / PDF (símbolo nuevo → `core/glossary.py`).
+   Apoyos elásticos (resortes): pendiente.
 2. Combinaciones de carga (CIRSOC 301 / AISC 360 LRFD-ASD).
 3. Pandeo flexional de columnas y pandeo lateral-torsional de vigas.
 4. Tensión de corte (τ = VQ/It) y von Mises combinada.

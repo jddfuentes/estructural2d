@@ -8,7 +8,7 @@ ocurre SOLO aquí. El core nunca ve unidades de UI.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import pandas as pd
@@ -87,6 +87,36 @@ def _editor(df: pd.DataFrame, key: str, column_config: dict[str, Any]) -> pd.Dat
     return out.dropna(how="any")
 
 
+def _member_release_editor(labels: list[str], key: str) -> pd.DataFrame:
+    """Editor compacto de rótulas por barra; los índices son los del modelo generado."""
+    return _editor(
+        pd.DataFrame({
+            "Barra": labels,
+            "Rótula inicio": [False] * len(labels),
+            "Rótula fin": [False] * len(labels),
+        }),
+        key,
+        {
+            "Barra": st.column_config.TextColumn(disabled=True),
+            "Rótula inicio": st.column_config.CheckboxColumn(default=False),
+            "Rótula fin": st.column_config.CheckboxColumn(default=False),
+        },
+    )
+
+
+def _apply_member_releases(model: Model, releases: pd.DataFrame) -> Model:
+    """Propaga los booleanos del editor a las barras del modelo construido."""
+    model.members = [
+        replace(
+            mem,
+            release_start=bool(releases.iloc[i]["Rótula inicio"]),
+            release_end=bool(releases.iloc[i]["Rótula fin"]),
+        )
+        for i, mem in enumerate(model.members)
+    ]
+    return model
+
+
 def sidebar() -> AppInputs:
     sb = st.sidebar
     with sb:
@@ -154,6 +184,17 @@ def _beam_inputs(material: Material, self_weight: bool) -> tuple[Callable[[Secti
         {"x ini [m]": st.column_config.NumberColumn(min_value=0.0, max_value=L, format="%.3f"),
          "x fin [m]": st.column_config.NumberColumn(min_value=0.0, max_value=L, format="%.3f")},
     )
+    xs = sorted({
+        0.0, L,
+        *[float(r["x [m]"]) for _, r in sup_df.iterrows()],
+        *[float(r["x [m]"]) for _, r in pl_df.iterrows()],
+        *[float(r["x ini [m]"]) for _, r in dl_df.iterrows()],
+        *[float(r["x fin [m]"]) for _, r in dl_df.iterrows()],
+    })
+    release_df = _member_release_editor(
+        [f"{i} ({a:.3f}–{b:.3f} m)" for i, (a, b) in enumerate(zip(xs, xs[1:], strict=False))],
+        "beam_member_releases",
+    )
 
     supports = [BeamSupport(float(r["x [m]"]) * M, SUPPORT_LABELS[str(r["Tipo"])])
                 for _, r in sup_df.iterrows()]
@@ -168,7 +209,8 @@ def _beam_inputs(material: Material, self_weight: bool) -> tuple[Callable[[Secti
     ]
 
     def builder(sec: Section) -> Model:
-        return build_beam(L * M, supports, sec, material, point_loads, dist_loads, self_weight)
+        model = build_beam(L * M, supports, sec, material, point_loads, dist_loads, self_weight)
+        return _apply_member_releases(model, release_df)
 
     return builder, L * M
 
@@ -192,10 +234,15 @@ def _portal_inputs(material: Material, column: Section, self_weight: bool
     )
     point_loads = [BeamPointLoad(float(r["x [m]"]) * M, Fy=-float(r["P [kN] ↓"]) * KN)
                    for _, r in pl_df.iterrows() if float(r["P [kN] ↓"]) != 0.0]
+    release_df = _member_release_editor(
+        ["0 (col. izq.)", "1 (viga)", "2 (col. der.)"],
+        "portal_member_releases",
+    )
 
     def builder(sec: Section) -> Model:
-        return build_portal_frame(span * M, height * M, column, sec, material, base_l, base_r,
-                                  beam_q=-q, lateral_load=H * KN, beam_point_loads=point_loads,
-                                  self_weight=self_weight)
+        model = build_portal_frame(span * M, height * M, column, sec, material, base_l, base_r,
+                                   beam_q=-q, lateral_load=H * KN, beam_point_loads=point_loads,
+                                   self_weight=self_weight)
+        return _apply_member_releases(model, release_df)
 
     return builder, span * M

@@ -11,6 +11,11 @@ Formulación
   (polinomios), por lo que son exactas aún con una sola barra por tramo.
 - Elástica dentro de cada barra por doble integración exacta de M/EI con
   las condiciones de borde nodales (exacta para Euler-Bernoulli).
+- Rótulas internas (`Member.release_start/release_end`): condensación estática local del
+  giro liberado. Matriz en forma cerrada (3EI/L³, 3EI/L², 3EI/L; biela: sólo EA/L) y cargas
+  equivalentes condensadas f_c = f_r − k_rc·k_cc⁻¹·f_c (exactas también para carga trapezoidal).
+  Un nudo donde TODAS las barras concurrentes están articuladas no tiene rigidez a giro: su GDL
+  rz se excluye del sistema y se informa 0 (cada barra gira por su cuenta).
 
 Convención de signos de solicitaciones (ejes locales de cada barra, x de i a j):
 - N > 0 tracción.
@@ -129,21 +134,73 @@ def _quantity(mr: MemberResult, q: str) -> FloatArray:
 # --------------------------------------------------------------------------- #
 
 
-def local_stiffness(E: float, A: float, I: float, L: float) -> FloatArray:  # noqa: E741
-    """Matriz de rigidez local 6x6 del elemento de pórtico."""
+_RZ_I, _RZ_J = 2, 5  # índices locales de los giros en (u_i, v_i, θ_i, u_j, v_j, θ_j)
+
+
+def released_dofs(release_start: bool, release_end: bool) -> tuple[int, ...]:
+    """Índices locales de los giros liberados (rótulas) de una barra."""
+    return tuple(d for d, flag in ((_RZ_I, release_start), (_RZ_J, release_end)) if flag)
+
+
+def local_stiffness(
+    E: float,
+    A: float,
+    I: float,  # noqa: E741
+    L: float,
+    release_start: bool = False,
+    release_end: bool = False,
+) -> FloatArray:
+    """Matriz de rigidez local 6x6 del elemento de pórtico.
+
+    Con rótulas devuelve la matriz condensada estáticamente en forma cerrada (Gere & Weaver,
+    "Analysis of Framed Structures", cap. 4): fila y columna del giro liberado nulas.
+    - Rótula en i: términos 3EI/L³ (corte), 3EI/L² y 3EI/L en θ_j.
+    - Rótula en j: simétrica, 3EI/L en θ_i.
+    - Rótula en ambos (biela): flexión y corte nulos, sólo EA/L.
+    """
     ea, ei = E * A / L, E * I
-    k1, k2, k3, k4 = 12 * ei / L**3, 6 * ei / L**2, 4 * ei / L, 2 * ei / L
+    if release_start and release_end:
+        k1 = k2 = k3 = k4 = k5 = k6 = 0.0
+    elif release_start or release_end:
+        a, b, c = 3 * ei / L**3, 3 * ei / L**2, 3 * ei / L
+        k1 = a
+        k2, k5 = (0.0, b) if release_start else (b, 0.0)  # acoples v-θ en i / en j
+        k3, k6 = (0.0, c) if release_start else (c, 0.0)  # θ_i-θ_i / θ_j-θ_j
+        k4 = 0.0  # acople θ_i-θ_j
+    else:
+        k1, k2, k3, k4 = 12 * ei / L**3, 6 * ei / L**2, 4 * ei / L, 2 * ei / L
+        k5, k6 = k2, k3
     return np.array(
         [
             [ea, 0, 0, -ea, 0, 0],
-            [0, k1, k2, 0, -k1, k2],
+            [0, k1, k2, 0, -k1, k5],
             [0, k2, k3, 0, -k2, k4],
             [-ea, 0, 0, ea, 0, 0],
-            [0, -k1, -k2, 0, k1, -k2],
-            [0, k2, k4, 0, -k2, k3],
+            [0, -k1, -k2, 0, k1, -k5],
+            [0, k5, k4, 0, -k5, k6],
         ],
         dtype=np.float64,
     )
+
+
+def static_condensation(
+    k: FloatArray, f: FloatArray, released: tuple[int, ...]
+) -> tuple[FloatArray, FloatArray]:
+    """Condensación estática de los GDL locales `released` (fuerza nula en ellos).
+
+    k_c = k_rr − k_rc·k_cc⁻¹·k_cr ;  f_c = f_r − k_rc·k_cc⁻¹·f_c, devueltas en 6x6 / 6 con
+    ceros exactos en filas, columnas y componentes condensadas.
+    """
+    if not released:
+        return k, f
+    rel = list(released)
+    keep = [d for d in range(k.shape[0]) if d not in released]
+    X = np.linalg.solve(k[np.ix_(rel, rel)], k[np.ix_(rel, keep)])  # k_cc⁻¹·k_cr
+    kc = np.zeros_like(k)
+    fc = np.zeros_like(f)
+    kc[np.ix_(keep, keep)] = k[np.ix_(keep, keep)] - k[np.ix_(keep, rel)] @ X
+    fc[keep] = f[keep] - X.T @ f[rel]  # k simétrica: k_rc·k_cc⁻¹ = (k_cc⁻¹·k_cr)ᵀ
+    return kc, fc
 
 
 def rotation_matrix(c: float, s: float) -> FloatArray:
@@ -223,12 +280,16 @@ def solve(model: Model, n_stations: int = 41) -> Results:
     for m, mem in enumerate(model.members):
         L = model.member_length(m)
         c, s = model.member_cos_sin(m)
-        k = local_stiffness(mem.material.E, mem.section.A, mem.section.I, L)
+        E, A, I = mem.material.E, mem.section.A, mem.section.I  # noqa: E741
+        k = local_stiffness(E, A, I, L, mem.release_start, mem.release_end)
         T = rotation_matrix(c, s)
         dofs = np.r_[3 * mem.i : 3 * mem.i + 3, 3 * mem.j : 3 * mem.j + 3]
         K[np.ix_(dofs, dofs)] += T.T @ k @ T
         qx1, qx2, qy1, qy2 = member_q[m]
         f_eq = equivalent_nodal_loads((qx1, qx2), (qy1, qy2), L)
+        released = released_dofs(mem.release_start, mem.release_end)
+        if released:  # cargas de empotramiento de la barra con rótula (p.ej. 3qL/8, 5qL/8, qL²/8)
+            f_eq = static_condensation(local_stiffness(E, A, I, L), f_eq, released)[1]
         F[dofs] += T.T @ f_eq
         elem.append((k, T, f_eq, dofs))
 
@@ -240,6 +301,18 @@ def solve(model: Model, n_stations: int = 41) -> Results:
     for sup in model.supports:
         restrained[3 * sup.node : 3 * sup.node + 3] = sup.type.restrained_dofs
     free = ~restrained
+
+    # Nudos totalmente articulados: rz sin rigidez -> fuera del sistema (giro nodal informado = 0)
+    hinged = _fully_hinged_nodes(model)
+    for p in model.nodal_loads:
+        if p.node in hinged and p.Mz != 0.0:
+            raise StructuralError(
+                f"Nodo {p.node}: momento aplicado en un nudo donde todas las barras tienen rótula; "
+                "no hay rigidez a giro que lo resista. Quitar una rótula o aplicar el momento en "
+                "un nudo con alguna barra continua."
+            )
+    for n in hinged:
+        free[3 * n + 2] = False
 
     U = np.zeros(ndof)
     if free.any():  # (puede no haber GDL libres: p.ej. barra biempotrada sin nodos intermedios)
@@ -269,6 +342,19 @@ def solve(model: Model, n_stations: int = 41) -> Results:
     return Results(displacements=U.reshape(-1, 3), reactions=reactions, members=members)
 
 
+def _fully_hinged_nodes(model: Model) -> set[int]:
+    """Nodos con al menos una barra donde TODAS las barras concurrentes tienen rótula en él."""
+    touched: set[int] = set()
+    rigid: set[int] = set()
+    for mem in model.members:
+        touched.update((mem.i, mem.j))
+        if not mem.release_start:
+            rigid.add(mem.i)
+        if not mem.release_end:
+            rigid.add(mem.j)
+    return touched - rigid
+
+
 def _member_results(
     model: Model,
     m: int,
@@ -284,7 +370,9 @@ def _member_results(
     c, s = model.member_cos_sin(m)
     E, sec = mem.material.E, mem.section
     ul = T @ u_global
-    f = k @ ul - f_eq  # fuerzas de extremo sobre la barra (locales)
+    # Fuerzas de extremo sobre la barra (locales). Con rótula, k y f_eq están condensadas:
+    # la componente de momento liberada es 0.0 exacto y el giro nodal no interviene.
+    f = k @ ul - f_eq
     qx1, qx2, qy1, qy2 = q
 
     # Polinomios exactos en x (local)
@@ -305,6 +393,12 @@ def _member_results(
     x = np.unique(np.concatenate([xs, _roots_in(Vpoly, L), _roots_in(vpoly.deriv(), L)]))
 
     Nx, Vx, Mx = Npoly(x), Vpoly(x), Mpoly(x)
+    # Rótulas: M = 0 exacto en el extremo liberado (x = 0 / x = L son siempre estaciones).
+    # M(0) = −f[2] ya es 0.0; M(L) se fija para eliminar el redondeo de evaluar el polinomio.
+    if mem.release_start:
+        Mx[0] = 0.0
+    if mem.release_end:
+        Mx[-1] = 0.0
     u, v = upoly(x), vpoly(x)
     (x1, y1) = model.nodes[mem.i]
     points = np.column_stack([x1 + c * x, y1 + s * x])
