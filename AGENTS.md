@@ -8,7 +8,8 @@ este archivo, gana este archivo salvo que la tarea diga explícitamente que lo m
 
 App web (Streamlit) de **predimensionamiento rápido y cálculo elástico lineal 2D** de
 vigas y pórticos planos para ingeniería mecánica/industrial. Método directo de rigidez,
-elemento de pórtico Euler-Bernoulli, verificación por tensión normal con FS = Sy/σmax.
+elemento de pórtico Euler-Bernoulli, verificación por tensión equivalente de von Mises con
+FS = Sy/σvM (σvM = σmax normal cuando gobierna la flexión; corte τ = VQ/It en el eje neutro).
 
 Filosofía: **tiempo de fin de semana, cero sobreingeniería**. Cada cambio tiene que
 poder revisarse en 10 minutos y estar cubierto por un test analítico.
@@ -94,7 +95,17 @@ Notación: fluencia **S<sub>y</sub>** (`Sy`) en mensajes, PDF y glosario; `Fx`, 
 - Ejes locales de barra: x de nodo `i` a `j`, y local = x rotado +90°.
 - Solicitaciones: **N > 0 tracción**; **M > 0 tracciona la fibra de y local negativa**
   (en vigas horizontales: fibra inferior, "sagging"); **V = dM/dx**.
-- Tensiones: `sigma_top = N/A − M·c_top/I`, `sigma_bot = N/A + M·c_bot/I`.
+- Tensiones: `sigma_top = N/A − M·c_top/I`, `sigma_bot = N/A + M·c_bot/I` (c_top ≠ c_bot en secciones
+  asimétricas; con M > 0 la fibra superior se comprime). σ_max = máx(|σ_top|, |σ_bot|).
+- Corte y von Mises (`core/verification.py`, `member_stresses`): τ = |V|·Q_max/(I·t_web) en el eje neutro
+  [MPa]; σ_vM = máx(σ_max [fibra extrema, τ ≈ 0], √((N/A)² + 3τ²) [eje neutro]). FS = Sy/σ_vM y en ELU
+  σ_vM,u ≤ φ·Sy. Con flexión dominante σ_vM = σ_max **exacto** (mismos FS, ubicación y textos de siempre).
+  `Section` sin datos de corte (`Q_max = 0` o `t_web = 0`, p. ej. `custom` sin Q) ⇒ τ = 0. Si gobierna el
+  corte, `issues` lo dice (`σvM = … (corte en el eje neutro, τ máx = …)`, en ELU `σvM,u`).
+- Eje débil: `Section.weak_axis(flip=False)` devuelve la sección orientada para flexionar en su eje débil
+  dentro del plano (I ↔ Iy, c_top/c_bot ↔ c_y1/c_y2, Q_max/t_web ↔ Q_y/t_y); el solver no cambia. En canales
+  (UPN, C) c_y1 = e (dorso del alma) ≠ c_y2 = b − e (puntas); `flip=True` pone las puntas arriba. Momento
+  fuera del plano: `weak_axis_bending_stress(section, M_y) = |M_y|/W_y` (no se combina con el del plano).
 - Reacciones: en ejes globales, sobre la estructura.
 - Rótulas internas: `Member.release_start` / `release_end` = M = 0 en el extremo i / j de esa
   barra (condensación estática local). El momento de un extremo liberado vale `0.0` exacto en
@@ -185,6 +196,16 @@ core.design.suggest_section(build, family, fs_min, max_deflection=None,
                             # phi dado: verifica con check_combinations (fs_min se ignora); la app usa φ = 0.90
 core.design.Suggestion(section, check, combination=None)  # combination: CombinationCheck si se usó phi
 core.materials.SECTIONS[family][name] -> Section             # claves de familia estables (ver abajo)
+core.materials.Section(..., Q_max=0, t_web=0, Iy=0, Wy=0, c_y1=0, c_y2=0, Q_y=0, t_y=0)  # al final [mm³,mm,mm⁴]
+core.materials.Section.weak_axis(flip=False) -> Section; .W_top, .W_bot, .c_y_max, .has_shear_data,
+                                                         .shear_factor  # Q/(I·t) [1/mm²]
+core.materials.custom(name, A, I, c, *, Q_max=0.0, t_web=0.0, Iy=0.0, Wy=0.0)
+core.verification.shear_stress(section, V) / von_mises(sigma, tau) -> FloatArray  # [MPa]
+core.verification.member_stresses(section, member_result) -> MemberStresses  # σ_top/bot, τ, σ_vM por estación
+core.verification.weak_axis_bending_stress(section, M_y) -> float  # |M_y| / W_y [MPa]
+core.verification.SafetyCheck: .tau_max, .sigma_vm_max, .shear_governs  # de la barra crítica;
+                               # .sigma_max sigue siendo la tensión NORMAL máx; .fs y .utilization usan σ_vM
+core.verification.CombinationCheck: .tau_max, .sigma_vm_max   # de la combinación gobernante
 core.materials.Section.linear_mass(rho) -> float [kg/m]       # mass_per_m = linear_mass(7850), acero
 core.materials.FAMILY_NOTES[family] -> str                   # fuente y supuestos de cada familia
 core.materials.family_warnings(family) -> tuple[str, ...]    # advertencias de alcance (UI y PDF)
@@ -308,8 +329,17 @@ Backlog priorizado (no implementar sin tarea explícita):
    (`beam_q_case`, `lateral_case`). Fuera de alcance (tarea aparte): ASD y cargas Lr / S / R / W / E
    (H lateral no se trata como viento: entra como D o L).
 3. Pandeo flexional de columnas y pandeo lateral-torsional de vigas.
-4. Tensión de corte (τ = VQ/It) y von Mises combinada.
-5. Flexión en eje débil y secciones asimétricas (ya soportadas en `Section` vía `c_top/c_bot`).
+4. ~~Tensión de corte (τ = VQ/It) y von Mises combinada~~ → **core completado**: `Section.Q_max/t_web`
+   para todo el catálogo (IPE/W por geometría con acuerdos deducidos del área de tabla; IPN/UPN con tf
+   medio; tubos, macizos y C conformado exactos), `shear_stress`, `von_mises`, `member_stresses`,
+   `SafetyCheck.tau_max/sigma_vm_max`, FS y ELU sobre σ_vM. Test: `test_shear_von_mises.py`.
+   **Pendiente Frontend/PDF**: mostrar τ_máx y σ_vM (métrica junto a "σ máx" en `app.py`, diagrama τ en
+   `ui/plots.py`, fila en la tabla de verificación de `core/reports.py`) y sus símbolos en `core/glossary.py`.
+5. ~~Flexión en eje débil y secciones asimétricas~~ → **core completado**: `Section.Iy/Wy/c_y1/c_y2/Q_y/t_y`
+   (IPE/W geometría; IPN/UPN Iy y e de tabla; C conformado exacto), `Section.weak_axis()`,
+   `weak_axis_bending_stress`, `W_top/W_bot`. `suggest_section(lambda s: build(s.weak_axis()), ...)` ya
+   busca el perfil en eje débil. **Pendiente Frontend**: selector "eje fuerte / eje débil (invertido)" en
+   `ui/inputs.py`. Fuera de alcance: flexión esviada combinada (M_z + M_y en una misma sección).
 6. Pórticos genéricos (editor de nodos/barras) y cargas térmicas.
 7. ~~Reporte PDF de memoria de cálculo~~ → hecho (`core/reports.py`), con esquema de cargas,
    deformada, diagramas N-V-M-σ vectoriales, convenciones de signo y glosario/simbología (§6 del PDF).
@@ -322,6 +352,8 @@ Backlog priorizado (no implementar sin tarea explícita):
 
 Elástico lineal, pequeñas deformaciones, Euler-Bernoulli (sin deformación por corte),
 sin efectos de segundo orden, sin pandeo ni fatiga, propiedades de catálogo nominales.
+von Mises se evalúa sólo en la fibra extrema y en el eje neutro (no en la unión ala-alma de los
+doble T, donde σ y τ coexisten); τ es la de Jourawski (corte elástico, sin plastificación del alma).
 Flecha: δ_máx es el desplazamiento total máximo de toda la estructura (en pórticos incluye el
 desplazamiento lateral) referido a una única L; en voladizos L es la longitud del voladizo.
 Por familia (`family_warnings()`): torsión no modelada en canales UPN / C cuando la carga no
