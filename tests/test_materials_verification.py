@@ -54,6 +54,25 @@ def test_hollow_sections_geometry():
     assert t.I == pytest.approx((100**4 - 90**4) / 12)
 
 
+def test_rhs_catalog_strong_axis_orientation():
+    """Tubo rectangular "Tubo H×B×t" en eje fuerte: H = lado mayor ⇒ I > Iy (FAMILY_NOTES).
+
+    Tubo 120x60x4 (B = 60, H = 120): I = [B·H³ − (B−2t)(H−2t)³]/12, Iy = [H·B³ − (H−2t)(B−2t)³]/12.
+    """
+    rect = SECTIONS["Tubo rectangular"]
+    assert rect
+    for name, s in rect.items():
+        assert s.h > s.b and s.I > s.Iy and s.W > s.Wy, name
+        H, B = (float(v) for v in name.removeprefix("Tubo ").split("x")[:2])
+        assert (s.h, s.b) == (H, B), name
+    assert "Tubo 60x120x4" not in rect
+    s = get_section("Tubo 120x60x4")
+    B, H, t = 60.0, 120.0, 4.0
+    assert (s.h, s.b, s.c_top, s.c_bot) == (H, B, H / 2, H / 2)
+    assert s.I == pytest.approx((B * H**3 - (B - 2 * t) * (H - 2 * t) ** 3) / 12, rel=1e-12)
+    assert s.Iy == pytest.approx((H * B**3 - (H - 2 * t) * (B - 2 * t) ** 3) / 12, rel=1e-12)
+
+
 def test_materials_basic():
     a36 = MATERIALS["ASTM A36"]
     assert a36.Sy == 250 and a36.E == 200_000

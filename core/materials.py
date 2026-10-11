@@ -504,7 +504,8 @@ _PIPE_SCH40: tuple[tuple[str, float, float], ...] = (
     ('10"', 273.0, 9.27),
 )
 
-# Tubos estructurales: (B, H, t) en mm
+# Tubos estructurales: (H, B, t) en mm. H = lado mayor = altura en el plano de flexión (eje fuerte),
+# B = ancho (eje débil), igual que FAMILY_NOTES["Tubo rectangular"]; designación "Tubo H×B×t".
 _RHS: tuple[tuple[float, float, float], ...] = (
     (40, 40, 2.0), (50, 50, 3.2), (60, 60, 3.2), (80, 80, 4.0), (100, 100, 5.0),
     (120, 120, 6.0), (150, 150, 6.0),
@@ -531,7 +532,7 @@ def _build_catalog() -> dict[str, dict[str, Section]]:
         add(cold_formed_channel(f"C {H:g}x{B:g}x{t:g}", H, B, t))
     for nps, D, t in _PIPE_SCH40:
         add(chs(f"Caño {nps} Sch40 (Ø{D:g}x{t:g})", D, t))
-    for B, H, t in _RHS:
+    for H, B, t in _RHS:
         add(rhs(f"Tubo {H:g}x{B:g}x{t:g}", B, H, t))
     return cat
 

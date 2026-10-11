@@ -348,7 +348,7 @@ def test_weak_axis_bending_stress_and_strong_vs_weak():
 
 def test_weak_axis_roundtrip_and_errors():
     """weak_axis() intercambia ejes y es involutiva; sin datos de eje débil lanza ValueError."""
-    names = ("IPE 200", "UPN 200", "W 200x22.5", "C 100x50x2", "Tubo 60x120x4",
+    names = ("IPE 200", "UPN 200", "W 200x22.5", "C 100x50x2", "Tubo 120x60x4",
              'Caño 4" Sch40 (Ø114.3x6.02)')
     for name in names:
         s = get_section(name)
