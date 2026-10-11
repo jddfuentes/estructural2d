@@ -69,13 +69,24 @@ def _section_picker(label: str, key: str, material: Material) -> tuple[Section, 
         I_cm4 = c1.number_input("I [cm⁴]", min_value=0.01, value=1943.0, key=f"{key}_I")
         A_cm2 = c2.number_input("A [cm²]", min_value=0.01, value=28.5, key=f"{key}_A")
         h = st.number_input("Altura h [mm]", min_value=1.0, value=200.0, key=f"{key}_h")
-        return custom("Personalizado", A=A_cm2 * 100, I=I_cm4 * 1e4, c=h / 2), fam
+        sec = custom("Personalizado", A=A_cm2 * 100, I=I_cm4 * 1e4, c=h / 2)
+        st.caption("Eje fuerte · sección personalizada sin propiedades de eje débil ni corte.")
+        return sec, fam
     names = list(SECTIONS[fam].keys())
     default = names.index(DEFAULT_SECTION[1]) if DEFAULT_SECTION[1] in names else len(names) // 2
     name = st.selectbox(f"{label}: perfil", names, index=default, key=f"{key}_name")
     sec = SECTIONS[fam][name]
-    st.caption(f"A = {sec.A / 100:.2f} cm² · I = {sec.I / 1e4:,.0f} cm⁴ · W = {sec.W / 1e3:,.1f} cm³ · "
-               f"{sec.linear_mass(material.rho):.1f} kg/m ({material.name})")
+    orientations = ["Eje fuerte (por defecto)"]
+    if sec.Iy > 0.0 and sec.c_y1 > 0.0 and sec.c_y2 > 0.0:
+        orientations.append("Eje débil")
+    orientation = st.selectbox("Orientación del perfil", orientations, key=f"{key}_orientation")
+    if orientation == "Eje débil":
+        sec = sec.weak_axis()
+    shear = (f" · Q = {sec.Q_max / 1e3:,.1f} cm³ · tᵥ = {sec.t_web:g} mm"
+             if sec.has_shear_data else " · sin datos de corte")
+    st.caption(f"{sec.name} · A = {sec.A / 100:.2f} cm² · I = {sec.I / 1e4:,.0f} cm⁴ · "
+               f"W = {sec.W / 1e3:,.1f} cm³{shear} · {sec.linear_mass(material.rho):.1f} kg/m "
+               f"({material.name})")
     return sec, fam
 
 

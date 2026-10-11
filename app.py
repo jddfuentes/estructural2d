@@ -134,7 +134,7 @@ def main() -> None:
     M, V, N = res.extreme("M"), res.extreme("V"), res.extreme("N")
 
     # ---- Indicadores ------------------------------------------------------- #
-    c0, c1, c2, c3, c4 = st.columns([1.3, 1, 1, 1, 1])
+    c0, c1, c2, c3, c4, c5, c6 = st.columns([1.3, 1, 1, 1, 1, 1, 1])
     with c0:
         verdict_badge(chk)
     strength = chk.strength
@@ -142,6 +142,10 @@ def main() -> None:
     c2.metric("M máx", f"{abs(M.value) / 1e6:.2f} kN·m",
               help=f"Barra {M.member}, x global = {M.point[0] / 1e3:.2f} m")
     c3.metric("V máx", f"{abs(V.value) / 1e3:.2f} kN")
+    c5.metric("τ máx", f"{chk.tau_max:.1f} MPa",
+              help="Tensión tangencial máxima τ = |V|·Q/(I·t) en el eje neutro")
+    c6.metric("σᵥᴹ máx", f"{chk.sigma_vm_max:.1f} MPa",
+              help="Tensión equivalente de von Mises gobernante")
     ratio = chk.service_check.deflection_ratio
     limit_help = (
         "sin límite de flecha"
@@ -151,6 +155,9 @@ def main() -> None:
     c4.metric("δ máx", f"{chk.delta_max:.2f} mm", help=f"Flecha ELS; {limit_help}",
               delta=f"L/{ratio:,.0f}" if ratio != float("inf") else None, delta_color="off")
 
+    if strength.shear_governs:
+        st.warning("El factor de seguridad está gobernado por corte en el eje neutro "
+                   "(von Mises), no por flexión pura.")
     for issue in chk.issues:
         st.warning(f"Servicio: {issue[4:]}" if issue.startswith("ELS ") else issue)
 
@@ -183,7 +190,8 @@ def main() -> None:
     selected_diagram = st.selectbox("Solicitaciones a visualizar", labels,
                                     index=labels.index(governing_label))
     diagram_results = diagram_options[selected_diagram]
-    tabs = st.tabs(["Estructura y deformada", "Momento M", "Corte V", "Normal N", "Tensión σ", "Reacciones",
+    tabs = st.tabs(["Estructura y deformada", "Momento M", "Corte V", "Normal N", "Tensión σ",
+                    "Tensión de corte τ", "Von Mises σᵥᴹ", "Reacciones",
                     "Predimensionamiento", "Bases teóricas"])
     with tabs[0]:
         st.plotly_chart(fig_deformed, width="stretch")
@@ -198,17 +206,22 @@ def main() -> None:
         st.plotly_chart(plot_diagram(model, diagram_results, "N"), width="stretch")
     with tabs[4]:
         st.plotly_chart(plot_diagram(model, diagram_results, "sigma"), width="stretch")
-        st.caption("σ = N/A ± M·c/I en fibra extrema. "
-                   "No incluye pandeo, PLT, corte ni concentración de tensiones.")
+        st.caption("σ = N/A ± M·c/I en fibra extrema; es la tensión normal, sin combinar con τ.")
     with tabs[5]:
+        st.plotly_chart(plot_diagram(model, diagram_results, "tau"), width="stretch")
+        st.caption("τ = |V|·Q/(I·t) en el eje neutro, según la orientación activa de la sección.")
+    with tabs[6]:
+        st.plotly_chart(plot_diagram(model, diagram_results, "sigma_vm"), width="stretch")
+        st.caption("σᵥᴹ = max(|σ|, √((N/A)² + 3τ²)): tensión equivalente gobernante.")
+    with tabs[7]:
         st.dataframe(reactions_table(model, res), hide_index=True, width="stretch",
                      column_config={c: st.column_config.NumberColumn(format="%.3f")
                                     for c in ("x [m]", "y [m]", "Rx [kN]", "Ry [kN]", "Mz [kN·m]")})
         st.caption(f"Reacciones de la combinación ELU gobernante ({chk.governing.name}, cargas mayoradas), "
                    "en ejes globales: Rx → +, Ry ↑ +, Mz antihorario +.")
-    with tabs[6]:
+    with tabs[8]:
         _design_tab(inp, chk)
-    with tabs[7]:
+    with tabs[9]:
         render_theory()
 
 

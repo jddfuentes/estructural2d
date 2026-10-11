@@ -6,7 +6,7 @@ from core.builders import BeamSupport, build_beam
 from core.materials import Material, custom
 from core.model import SupportType
 from core.solver import solve
-from ui.plots import plot_structure
+from ui.plots import plot_diagram, plot_structure
 
 
 def test_structure_plot_shows_global_reference_axes() -> None:
@@ -47,3 +47,20 @@ def test_structure_plot_spring_labels_units_and_side() -> None:
     spring_traces = [t for t in figure.data if t.line is not None and t.line.color == "#B45309"]
     right = [t for t in spring_traces if min(t.x) >= x_right - 1e-9 and max(t.x) > x_right]
     assert right, "el resorte Kx del nodo derecho debe quedar a la derecha (hacia afuera)"
+
+
+def test_stress_diagrams_render_shear_and_von_mises() -> None:
+    material = Material("test", E=200_000.0, Sy=250.0, Su=400.0)
+    section = custom("test", A=3_000.0, I=2.0e7, c=100.0, Q_max=25_000.0, t_web=8.0)
+    model = build_beam(
+        6_000.0,
+        [BeamSupport(0.0, SupportType.PINNED), BeamSupport(6_000.0, SupportType.ROLLER)],
+        section,
+        material,
+        dist_loads=[],
+    )
+    results = solve(model)
+    for quantity, title in (("tau", "Tensión de corte"), ("sigma_vm", "von Mises")):
+        figure = plot_diagram(model, results, quantity)
+        assert title in figure.layout.title.text
+        assert len(figure.data) > 0

@@ -13,8 +13,10 @@ from dataclasses import dataclass
 import numpy as np
 import plotly.graph_objects as go
 
+from core.materials import Section
 from core.model import SELF_WEIGHT, DistributedLoad, LoadCase, LoadDirection, Model, Spring, SupportType
 from core.solver import MemberResult, Results
+from core.verification import member_stresses
 
 # --------------------------------------------------------------------------- #
 # Estilo
@@ -29,7 +31,10 @@ CASE_STYLE = {LoadCase.DEAD: (C_LOAD_D, "D (permanente)"), LoadCase.LIVE: (C_LOA
 C_DEFORMED = "#2563EB"
 C_GRID = "rgba(120,130,145,0.18)"
 C_REFERENCE = "#475569"
-DIAGRAM_COLORS = {"M": "#7C3AED", "V": "#0891B2", "N": "#16A34A", "sigma": "#DC2626", "uy": "#2563EB"}
+DIAGRAM_COLORS = {
+    "M": "#7C3AED", "V": "#0891B2", "N": "#16A34A", "sigma": "#DC2626",
+    "tau": "#EA580C", "sigma_vm": "#B91C1C", "uy": "#2563EB",
+}
 
 M_TO = 1e-3  # mm -> m
 KN = 1e-3  # N -> kN
@@ -48,6 +53,8 @@ DIAGRAMS: dict[str, DiagramSpec] = {
     "V": DiagramSpec("Esfuerzo de corte V", "kN", KN),
     "N": DiagramSpec("Esfuerzo normal N", "kN", KN),
     "sigma": DiagramSpec("Tensión normal máx. |σ|", "MPa", 1.0),
+    "tau": DiagramSpec("Tensión de corte τ", "MPa", 1.0),
+    "sigma_vm": DiagramSpec("Tensión equivalente de von Mises σᵥᴹ", "MPa", 1.0),
     "uy": DiagramSpec("Desplazamiento vertical", "mm", 1.0),
 }
 
@@ -75,7 +82,12 @@ def _extent(model: Model) -> float:
     return float(max(span.max(), 1.0))
 
 
-def _quantity(mr: MemberResult, q: str) -> np.ndarray:
+def _quantity(mr: MemberResult, q: str, section: Section | None = None) -> np.ndarray:
+    if q in ("tau", "sigma_vm"):
+        if section is None:
+            raise ValueError(f"La sección es necesaria para el diagrama {q!r}.")
+        stresses = member_stresses(section, mr)
+        return stresses.tau if q == "tau" else stresses.sigma_vm
     return {
         "M": mr.M, "V": mr.V, "N": mr.N, "sigma": mr.sigma_abs, "uy": mr.displacement[:, 1],
     }[q]
@@ -530,7 +542,7 @@ def _draw_deformed(fig: go.Figure, model: Model, results: Results, ext: float,
 
 def plot_diagram(model: Model, results: Results, quantity: str, moment_on_tension_side: bool = True
                  ) -> go.Figure:
-    """Diagrama de 'M', 'V', 'N', 'sigma' o 'uy'.
+    """Diagrama de 'M', 'V', 'N', 'sigma', 'tau', 'sigma_vm' o 'uy'.
 
     Viga horizontal -> gráfico cartesiano clásico f(x).
     Pórtico -> diagrama dibujado perpendicular a cada barra sobre la geometría.
@@ -545,7 +557,9 @@ def _beam_diagram(model: Model, results: Results, q: str, tension_side: bool) ->
     spec, color = DIAGRAMS[q], DIAGRAM_COLORS[q]
     x0 = model.nodes[0][0]
     xs = np.concatenate([mr.points[:, 0] for mr in results.members])
-    vals = np.concatenate([_quantity(mr, q) for mr in results.members]) * spec.factor
+    vals = np.concatenate([
+        _quantity(mr, q, model.members[mr.member].section) for mr in results.members
+    ]) * spec.factor
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=(xs - x0) * M_TO, y=vals, mode="lines", fill="tozeroy", line=dict(color=color, width=2.5),
@@ -579,14 +593,16 @@ def _frame_diagram(model: Model, results: Results, q: str) -> go.Figure:
         (x1, y1), (x2, y2) = model.nodes[mem.i], model.nodes[mem.j]
         fig.add_trace(go.Scatter(x=[x1 * M_TO, x2 * M_TO], y=[y1 * M_TO, y2 * M_TO], mode="lines",
                                  line=dict(color=C_MEMBER, width=3), hoverinfo="skip", showlegend=False))
-    all_vals = np.concatenate([_quantity(mr, q) for mr in results.members])
+    all_vals = np.concatenate([
+        _quantity(mr, q, model.members[mr.member].section) for mr in results.members
+    ])
     vmax = float(np.abs(all_vals).max()) or 1.0
     scale = 0.12 * _extent(model) / vmax
 
     for mr in results.members:
         c, s = model.member_cos_sin(mr.member)
         ny_ = np.array([-s, c])  # y local
-        v = _quantity(mr, q)
+        v = _quantity(mr, q, model.members[mr.member].section)
         # M del lado traccionado: M > 0 tracciona y local negativa
         sgn = -1.0 if q == "M" else 1.0
         off = mr.points + np.outer(sgn * v * scale, ny_)
