@@ -56,9 +56,9 @@ from reportlab.platypus import Image as RLImage
 
 from core.glossary import GRAPHIC_SYMBOLS, NOTATION, TERMS
 from core.materials import FAMILY_NOTES, Material, Section, family_warnings
-from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model, Spring, SupportType
+from core.model import SELF_WEIGHT, DistributedLoad, LoadCase, LoadDirection, Model, Spring, SupportType
 from core.solver import MemberResult, Results
-from core.verification import SafetyCheck, Status, default_reference_length
+from core.verification import CombinationCheck, SafetyCheck, Status, default_reference_length
 
 __all__ = ["build_pdf_report"]
 
@@ -168,7 +168,7 @@ STYLES: dict[str, ParagraphStyle] = {
 def build_pdf_report(
     model: Model,
     results: Results,
-    check: SafetyCheck,
+    check: SafetyCheck | CombinationCheck,
     project_title: str = "Memoria de Cálculo",
     author: str = "",
     *,
@@ -195,16 +195,17 @@ def build_pdf_report(
     author = author.strip()
     if reference_length is not None and reference_length <= 0.0:
         raise ValueError("La longitud de referencia para la flecha debe ser positiva [mm].")
+    base_check = check.strength if isinstance(check, CombinationCheck) else check
     L_ref = reference_length if reference_length is not None else (
-        check.reference_length or _horizontal_extent(model)
+        base_check.reference_length or _horizontal_extent(model)
     )
 
     buf = io.BytesIO()
     doc = _Doc(buf, title=title, author=author or APP_NAME, date=date)
     figs = _Figures() if include_figures else None
     story: list[Flowable] = []
-    story += _title_block(model, check, title, author, date)
-    story += _section_basis(check, L_ref, figs, include_glossary)
+    story += _title_block(model, base_check, title, author, date)
+    story += _section_basis(base_check, L_ref, figs, include_glossary)
     story += _section_inputs(model, figs)
     if image_bytes is not None:
         story += _embedded_plot(image_bytes)
@@ -441,22 +442,24 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
     out.append(_p("Valores con signo en ejes globales (Fy &lt; 0 y q &lt; 0: hacia abajo).", "note"))
     if model.nodal_loads:
         rows = [[str(p.node), f"{model.nodes[p.node][0] * _M:.3f}", f"{model.nodes[p.node][1] * _M:.3f}",
-                 _num(p.Fx * _KN), _num(p.Fy * _KN), _num(p.Mz * _KNM)] for p in model.nodal_loads]
+                 _CASE_TXT[p.case], _num(p.Fx * _KN), _num(p.Fy * _KN), _num(p.Mz * _KNM)]
+                for p in model.nodal_loads]
         out.append(_p("<b>Cargas concentradas</b>", "body"))
-        out.append(_table(["Nodo", "x [m]", "y [m]", "Fx [kN]", "Fy [kN]", "Mz [kN·m]"], rows,
-                          [0.12, 0.16, 0.16, 0.18, 0.18, 0.20], num_cols={1, 2, 3, 4, 5}))
+        out.append(_table(["Nodo", "x [m]", "y [m]", "Hipótesis", "Fx [kN]", "Fy [kN]", "Mz [kN·m]"], rows,
+                          [0.10, 0.14, 0.14, 0.14, 0.16, 0.16, 0.16], num_cols={1, 2, 4, 5, 6}))
     groups = _group_distributed(model)
     if groups:
         out.append(Spacer(1, 2 * mm))
         out.append(_p("<b>Cargas distribuidas</b>", "body"))
         beam = model.is_horizontal_beam()
         span_head = "Tramo x [m]" if beam else "Desde → hasta (x; y) [m]"
-        rows = [[g.origin, g.members,
+        rows = [[g.origin, g.members, _CASE_TXT[g.case],
                  f"{g.p0[0] * _M:.3f} → {g.p1[0] * _M:.3f}" if beam else
                  f"({g.p0[0] * _M:.2f}; {g.p0[1] * _M:.2f}) → ({g.p1[0] * _M:.2f}; {g.p1[1] * _M:.2f})",
                  _DIR_TXT[g.direction], _num(g.q0), _num(g.q1)] for g in groups]  # N/mm == kN/m
-        out.append(_table(["Origen", "Barras", span_head, "Dirección", "q ini [kN/m]", "q fin [kN/m]"],
-                          rows, [0.14, 0.09, 0.29, 0.18, 0.15, 0.15], num_cols={4, 5}))
+        out.append(_table(["Origen", "Barras", "Hipótesis", span_head, "Dirección",
+                           "q ini [kN/m]", "q fin [kN/m]"],
+                          rows, [0.12, 0.08, 0.12, 0.25, 0.16, 0.14, 0.13], num_cols={5, 6}))
     if not model.nodal_loads and not groups:
         out.append(_p("Sin cargas aplicadas.", "body"))
 
@@ -558,7 +561,35 @@ def _section_results(model: Model, results: Results, L_ref: float, figs: _Figure
     return out
 
 
-def _section_verification(check: SafetyCheck) -> list[Flowable]:
+def _section_verification(check: SafetyCheck | CombinationCheck) -> list[Flowable]:
+    if isinstance(check, CombinationCheck):
+        strength = check.strength
+        rows = [
+            ["Combinación gobernante ELU", f"<b>{check.governing.name}</b>"],
+            ["Criterio de resistencia", f"σu ≤ φ·S<sub>y</sub>, φ = {check.phi:g}"],
+            ["Tensión última máxima σu", f"{strength.sigma_max:,.1f} MPa"],
+            ["Resistencia φ·S<sub>y</sub>", f"{check.phi * strength.sy:,.1f} MPa"],
+            ["Utilización σu / (φ·S<sub>y</sub>)", f"{check.utilization:.0%}"],
+            ["Flecha máxima ELS (1.0D + 1.0L)", f"{check.delta_max:,.2f} mm"],
+            ["Flecha relativa ELS", f"<b>L/{check.service_check.deflection_ratio:,.0f}</b>"
+             if math.isfinite(check.service_check.deflection_ratio) else "—"],
+        ]
+        if check.service_check.deflection_limit_ratio > 0:
+            rows.append(["Flecha admisible ELS",
+                         f"L/{check.service_check.deflection_limit_ratio:g} = "
+                         f"{check.service_check.delta_adm:,.2f} mm"])
+        fg, bg = STATUS_COLORS[check.status]
+        v_style = ParagraphStyle("verdict_comb", parent=STYLES["body"], fontSize=11, leading=14,
+                                 textColor=fg)
+        verdict = Table([[Paragraph(f"<b>VEREDICTO: {_verdict_text(check.strength)}</b>", v_style)]],
+                        colWidths=[CONTENT_W])
+        verdict.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), bg),
+                                     ("LINEBEFORE", (0, 0), (0, -1), 4, fg),
+                                     ("TOPPADDING", (0, 0), (-1, -1), 7),
+                                     ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                                     ("LEFTPADDING", (0, 0), (-1, -1), 10)]))
+        return [KeepTogether([_h1("4. Verificación de seguridad"), _kv_table(rows),
+                              Spacer(1, 3 * mm), verdict])]
     fg, bg = STATUS_COLORS[check.status]
     fs_txt = "∞" if math.isinf(check.fs) else f"{check.fs:.2f}"
     rows = [
@@ -755,12 +786,14 @@ def _section_glossary() -> list[Flowable]:
 
 _DIR_TXT = {LoadDirection.GLOBAL_Y: "Vertical (Y)", LoadDirection.GLOBAL_X: "Horizontal (X)",
             LoadDirection.LOCAL_Y: "Perpendicular a barra"}
+_CASE_TXT = {LoadCase.DEAD: "D (Muerta)", LoadCase.LIVE: "L (Viva)"}
 
 
 @dataclass(frozen=True, slots=True)
 class _LoadGroup:
     origin: str
     members: str
+    case: LoadCase
     p0: tuple[float, float]  # punto inicial (x, y) [mm]
     p1: tuple[float, float]  # punto final (x, y) [mm]
     direction: LoadDirection
@@ -771,12 +804,12 @@ class _LoadGroup:
 def _chain_loads(model: Model, loads: Sequence[DistributedLoad]) -> list[list[DistributedLoad]]:
     """Une tramos contiguos de una misma carga (el builder la parte en barras)."""
     groups: list[list[DistributedLoad]] = []
-    for d in sorted(loads, key=lambda d: (d.label, d.direction.value, d.member)):
+    for d in sorted(loads, key=lambda d: (d.case.value, d.label, d.direction.value, d.member)):
         if groups:
             p = groups[-1][-1]
             sp = (p.q_end - p.q_start) / model.member_length(p.member)
             sd = (d.q_end - d.q_start) / model.member_length(d.member)
-            if (p.label == d.label and p.direction is d.direction
+            if (p.case is d.case and p.label == d.label and p.direction is d.direction
                     and model.members[p.member].j == model.members[d.member].i
                     and math.isclose(p.q_end, d.q_start, rel_tol=1e-6, abs_tol=1e-9)
                     and math.isclose(sp, sd, rel_tol=1e-6, abs_tol=1e-12)):
@@ -794,7 +827,7 @@ def _group_distributed(model: Model) -> list[_LoadGroup]:
         ids = f"{g[0].member}" if len(g) == 1 else f"{g[0].member}–{g[-1].member}"
         out.append(_LoadGroup(
             origin="Peso propio" if g[0].label == SELF_WEIGHT else (g[0].label or "Usuario"),
-            members=ids, p0=model.nodes[first.i], p1=model.nodes[last.j],
+            members=ids, case=g[0].case, p0=model.nodes[first.i], p1=model.nodes[last.j],
             direction=g[0].direction, q0=g[0].q_start, q1=g[-1].q_end,
         ))
     return out

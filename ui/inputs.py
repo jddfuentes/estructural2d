@@ -26,7 +26,7 @@ from core.materials import (
     custom,
     family_warnings,
 )
-from core.model import Model, Spring, SupportType
+from core.model import LoadCase, Model, Spring, SupportType
 from core.verification import FS_MIN_DEFAULT
 
 M = 1e3  # m -> mm
@@ -190,17 +190,21 @@ def _beam_inputs(material: Material, self_weight: bool) -> tuple[Callable[[Secti
     )
     st.markdown("**Cargas puntuales**")
     pl_df = _editor(
-        pd.DataFrame({"x [m]": [L / 2], "P [kN] ↓": [20.0], "M [kN·m] ↺": [0.0]}),
+        pd.DataFrame({"x [m]": [L / 2], "P [kN] ↓": [20.0], "M [kN·m] ↺": [0.0],
+                      "Hipótesis": [LoadCase.DEAD.value]}),
         "point_loads",
-        {"x [m]": st.column_config.NumberColumn(min_value=0.0, max_value=L, step=0.1, format="%.3f")},
+        {"x [m]": st.column_config.NumberColumn(min_value=0.0, max_value=L, step=0.1, format="%.3f"),
+         "Hipótesis": st.column_config.SelectboxColumn(options=["D", "L"], default="D", required=True)},
     )
     st.markdown("**Cargas distribuidas**")
     dl_df = _editor(
         pd.DataFrame({"x ini [m]": [0.0], "x fin [m]": [L],
-                      "q ini [kN/m] ↓": [10.0], "q fin [kN/m] ↓": [10.0]}),
+                      "q ini [kN/m] ↓": [10.0], "q fin [kN/m] ↓": [10.0],
+                      "Caso": [LoadCase.DEAD.value]}),
         "dist_loads",
         {"x ini [m]": st.column_config.NumberColumn(min_value=0.0, max_value=L, format="%.3f"),
-         "x fin [m]": st.column_config.NumberColumn(min_value=0.0, max_value=L, format="%.3f")},
+         "x fin [m]": st.column_config.NumberColumn(min_value=0.0, max_value=L, format="%.3f"),
+         "Caso": st.column_config.SelectboxColumn(options=["D", "L"], default="D", required=True)},
     )
     xs = sorted({
         0.0, L,
@@ -228,12 +232,14 @@ def _beam_inputs(material: Material, self_weight: bool) -> tuple[Callable[[Secti
         for _, r in sup_df.iterrows()
     ]
     point_loads = [
-        BeamPointLoad(float(r["x [m]"]) * M, Fy=-float(r["P [kN] ↓"]) * KN, Mz=float(r["M [kN·m] ↺"]) * KNM)
+        BeamPointLoad(float(r["x [m]"]) * M, Fy=-float(r["P [kN] ↓"]) * KN,
+                      Mz=float(r["M [kN·m] ↺"]) * KNM, case=LoadCase(str(r["Hipótesis"])))
         for _, r in pl_df.iterrows()
     ]
     dist_loads = [
         BeamDistLoad(float(r["x ini [m]"]) * M, float(r["x fin [m]"]) * M,
-                     -float(r["q ini [kN/m] ↓"]), -float(r["q fin [kN/m] ↓"]))  # kN/m = N/mm
+                     -float(r["q ini [kN/m] ↓"]), -float(r["q fin [kN/m] ↓"]),
+                     case=LoadCase(str(r["Caso"])))  # kN/m = N/mm
         for _, r in dl_df.iterrows()
     ]
 
@@ -275,11 +281,13 @@ def _portal_inputs(material: Material, column: Section, self_weight: bool
     H = st.number_input("Carga lateral en nudo sup. izq. [kN] →", value=10.0, step=1.0)
     st.markdown("**Cargas puntuales sobre la viga**")
     pl_df = _editor(
-        pd.DataFrame({"x [m]": [span / 2], "P [kN] ↓": [0.0]}),
+        pd.DataFrame({"x [m]": [span / 2], "P [kN] ↓": [0.0], "Hipótesis": [LoadCase.DEAD.value]}),
         "portal_point_loads",
-        {"x [m]": st.column_config.NumberColumn(min_value=0.0, max_value=span, step=0.1, format="%.3f")},
+        {"x [m]": st.column_config.NumberColumn(min_value=0.0, max_value=span, step=0.1, format="%.3f"),
+         "Hipótesis": st.column_config.SelectboxColumn(options=["D", "L"], default="D", required=True)},
     )
-    point_loads = [BeamPointLoad(float(r["x [m]"]) * M, Fy=-float(r["P [kN] ↓"]) * KN)
+    point_loads = [BeamPointLoad(float(r["x [m]"]) * M, Fy=-float(r["P [kN] ↓"]) * KN,
+                                 case=LoadCase(str(r["Hipótesis"])))
                    for _, r in pl_df.iterrows() if float(r["P [kN] ↓"]) != 0.0]
     release_df = _member_release_editor(
         ["0 (col. izq.)", "1 (viga)", "2 (col. der.)"],

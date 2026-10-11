@@ -95,6 +95,18 @@ NOTATION: tuple[Group, ...] = (
         ),
     ),
     Group(
+        "Hipótesis y combinaciones",
+        (
+            Entry("D", "Hipótesis de carga permanente: peso propio, terminaciones y equipos fijos."),
+            Entry("L", "Hipótesis de sobrecarga de uso, ocupación, mantenimiento o cargas móviles."),
+            Entry("ELU", "Estado límite último: resistencia con cargas mayoradas."),
+            Entry("ELS", "Estado límite de servicio: aptitud de uso y control de flechas."),
+            Entry("φ", "Factor de resistencia; en este informe φ = 0.90 para la verificación ELU."),
+            Entry("1.4D; 1.2D + 1.6L", "Combinaciones normativas de resistencia."),
+            Entry("1.0D + 1.0L", "Combinación normativa de servicio sin mayoración."),
+        ),
+    ),
+    Group(
         "Apoyos elásticos",
         (
             Entry("K_{x}, K_{y}", "Rigidez de resorte traslacional según los ejes globales X e Y.", "kN/m"),
@@ -244,6 +256,14 @@ TERMS: tuple[Term, ...] = (
         "Condición de uso que no compromete la resistencia pero limita la aptitud de la estructura "
         "(flechas, vibraciones). Acá se controla la flecha: δ_{máx} ≤ L/N. Si no se cumple sin "
         "fluencia, el veredicto es ALERTA.",
+    ),
+    Term(
+        "Combinación de carga",
+        "Superposición lineal de hipótesis D y L con factores γ para evaluar un estado límite.",
+    ),
+    Term(
+        "Estado límite último",
+        "ELU: evaluación de resistencia frente a tensión última σu ≤ φ·Sy.",
     ),
     Term(
         "Fluencia",

@@ -13,10 +13,10 @@ import streamlit as st
 
 from core.design import suggest_section
 from core.materials import family_warnings
-from core.model import Model
+from core.model import COMB_1_2D_1_6L, COMB_1_4D, COMB_SERVICE_D_L, LoadCase, Model
 from core.reports import build_pdf_report
-from core.solver import Results, StructuralError, solve
-from core.verification import SafetyCheck, Status, check_safety
+from core.solver import Results, StructuralError, solve_combinations, solve_load_cases
+from core.verification import CombinationCheck, SafetyCheck, Status, check_combinations
 from ui.inputs import AppInputs, sidebar
 from ui.plots import plot_diagram, plot_structure
 from ui.theory import render_theory
@@ -36,7 +36,9 @@ def _pdf_filename(title: str) -> str:
     return f"{filename or 'memoria'}.pdf"
 
 
-def fs_badge(chk: SafetyCheck) -> None:
+def fs_badge(chk: SafetyCheck | CombinationCheck) -> None:
+    if isinstance(chk, CombinationCheck):
+        chk = chk.strength
     fg, bg, label = STATUS_STYLE[chk.status]
     fs_txt = "∞" if chk.fs == float("inf") else f"{chk.fs:.2f}"
     st.markdown(
@@ -66,35 +68,36 @@ def main() -> None:
     model: Model | None = None
     try:
         model = inp.model()
-        res = solve(model)
+        chk = check_combinations(model, deflection_limit_ratio=inp.deflection_limit_ratio)
     except (ValueError, StructuralError) as exc:
         st.error(f"**No se pudo resolver el modelo:** {exc}")
         if model is not None:
             st.plotly_chart(plot_structure(model), width="stretch")
         return
 
-    chk = check_safety(model, res, inp.fs_min, deflection_limit_ratio=inp.deflection_limit_ratio)
+    res = chk.governing_results
     M, V, N = res.extreme("M"), res.extreme("V"), res.extreme("N")
 
     # ---- Indicadores ------------------------------------------------------- #
     c0, c1, c2, c3, c4 = st.columns([1.3, 1, 1, 1, 1])
     with c0:
         fs_badge(chk)
-    c1.metric("σ máx", f"{chk.sigma_max:.1f} MPa", help="|N/A ± M·c/I| máximo en toda la estructura")
+    strength = chk.strength
+    c1.metric("σ máx", f"{strength.sigma_max:.1f} MPa", help="|N/A ± M·c/I| máximo en ELU")
     c2.metric("M máx", f"{abs(M.value) / 1e6:.2f} kN·m",
               help=f"Barra {M.member}, x global = {M.point[0] / 1e3:.2f} m")
     c3.metric("V máx", f"{abs(V.value) / 1e3:.2f} kN")
-    ratio = chk.deflection_ratio
+    ratio = chk.service_check.deflection_ratio
     limit_help = (
         "sin límite de flecha"
         if inp.deflection_limit_ratio == 0.0
         else f"límite de servicio L/{inp.deflection_limit_ratio:g}"
     )
-    c4.metric("δ máx", f"{chk.delta_max:.2f} mm", help=f"Desplazamiento total máximo; {limit_help}",
+    c4.metric("δ máx", f"{chk.delta_max:.2f} mm", help=f"Flecha ELS; {limit_help}",
               delta=f"L/{ratio:,.0f}" if ratio != float("inf") else None, delta_color="off")
 
     for issue in chk.issues:
-        st.warning(issue)
+        st.warning(f"Servicio: {issue[4:]}" if issue.startswith("ELS ") else issue)
 
     # ---- Memoria ---------------------------------------------------------- #
     with st.expander("Memoria de cálculo (PDF)"):
@@ -107,25 +110,37 @@ def main() -> None:
             st.sidebar.caption("Nota: Gráfico no incrustado en PDF (kaleido no disponible).")
             img_bytes = None
         pdf = build_pdf_report(model, res, chk, report_title, author,
-                               reference_length=chk.reference_length, image_bytes=img_bytes)
+                               reference_length=chk.service_check.reference_length, image_bytes=img_bytes)
         st.download_button("Descargar memoria", data=pdf, file_name=_pdf_filename(report_title),
                            mime="application/pdf")
 
     # ---- Gráficos ---------------------------------------------------------- #
+    case_results = solve_load_cases(model)
+    elu_results = solve_combinations(model, [COMB_1_4D, COMB_1_2D_1_6L])
+    diagram_options = {
+        f"ELU: {COMB_1_4D.name}": elu_results[0],
+        f"ELU: {COMB_1_2D_1_6L.name}": elu_results[1],
+        f"ELS: {COMB_SERVICE_D_L.name}": chk.service_results,
+        "Hipótesis individual: D (Muerta)": case_results[LoadCase.DEAD],
+    }
+    if LoadCase.LIVE in case_results:
+        diagram_options["Hipótesis individual: L (Viva)"] = case_results[LoadCase.LIVE]
+    selected_diagram = st.selectbox("Solicitaciones a visualizar", list(diagram_options))
+    diagram_results = diagram_options[selected_diagram]
     tabs = st.tabs(["Estructura y deformada", "Momento M", "Corte V", "Normal N", "Tensión σ", "Reacciones",
                     "Predimensionamiento", "Bases teóricas"])
     with tabs[0]:
         st.plotly_chart(fig_deformed, width="stretch")
     with tabs[1]:
-        st.plotly_chart(plot_diagram(model, res, "M", inp.moment_tension_side), width="stretch")
+        st.plotly_chart(plot_diagram(model, diagram_results, "M", inp.moment_tension_side), width="stretch")
     with tabs[2]:
-        st.plotly_chart(plot_diagram(model, res, "V"), width="stretch")
+        st.plotly_chart(plot_diagram(model, diagram_results, "V"), width="stretch")
     with tabs[3]:
         if abs(N.value) < 1e-6:
             st.info("Esfuerzo normal nulo en toda la estructura.")
-        st.plotly_chart(plot_diagram(model, res, "N"), width="stretch")
+        st.plotly_chart(plot_diagram(model, diagram_results, "N"), width="stretch")
     with tabs[4]:
-        st.plotly_chart(plot_diagram(model, res, "sigma"), width="stretch")
+        st.plotly_chart(plot_diagram(model, diagram_results, "sigma"), width="stretch")
         st.caption("σ = N/A ± M·c/I en fibra extrema. "
                    "No incluye pandeo, PLT, corte ni concentración de tensiones.")
     with tabs[5]:

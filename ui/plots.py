@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import plotly.graph_objects as go
 
-from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model, Spring, SupportType
+from core.model import SELF_WEIGHT, DistributedLoad, LoadCase, LoadDirection, Model, Spring, SupportType
 from core.solver import MemberResult, Results
 
 # --------------------------------------------------------------------------- #
@@ -25,6 +25,8 @@ C_SUPPORT = "#5B6573"
 C_SPRING = "#B45309"
 C_LOAD = "#C2410C"
 C_LOAD_Q = "#EA580C"
+C_LOAD_D = "#C2410C"
+C_LOAD_L = "#7C3AED"
 C_DEFORMED = "#2563EB"
 C_GRID = "rgba(120,130,145,0.18)"
 C_REFERENCE = "#475569"
@@ -338,23 +340,31 @@ def _arrow(fig: go.Figure, head: tuple[float, float], tail: tuple[float, float],
 
 def _draw_point_loads(fig: go.Figure, model: Model, ext: float) -> None:
     L = 0.14 * ext
+    shown_cases: set[LoadCase] = set()
     for p in model.nodal_loads:
+        color = C_LOAD_D if p.case is LoadCase.DEAD else C_LOAD_L
+        if p.case not in shown_cases:
+            case_name = "Muerta" if p.case is LoadCase.DEAD else "Viva"
+            fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
+                                     line=dict(color=color, width=3),
+                                     name=f"{p.case.value} ({case_name})"))
+            shown_cases.add(p.case)
         x0, y0 = model.nodes[p.node]
         F = math.hypot(p.Fx, p.Fy)
         if F > 0:
             ux, uy = p.Fx / F, p.Fy / F
             label = f"{F * KN:.3g} kN"
-            _arrow(fig, (x0, y0), (x0 - ux * L, y0 - uy * L), C_LOAD, label, 2.5)
+            _arrow(fig, (x0, y0), (x0 - ux * L, y0 - uy * L), color, label, 2.5)
         if p.Mz:
             r = 0.06 * ext
             sign = 1.0 if p.Mz > 0 else -1.0
             th = np.linspace(-0.75 * math.pi, 0.75 * math.pi, 40) * sign + math.pi / 2
             ax_, ay_ = x0 + r * np.cos(th), y0 + r * np.sin(th)
             fig.add_trace(go.Scatter(x=ax_ * M_TO, y=ay_ * M_TO, mode="lines",
-                                     line=dict(color=C_LOAD, width=2.5), hoverinfo="skip", showlegend=False))
-            _arrow(fig, (ax_[-1], ay_[-1]), (ax_[-3], ay_[-3]), C_LOAD)
+                                     line=dict(color=color, width=2.5), hoverinfo="skip", showlegend=False))
+            _arrow(fig, (ax_[-1], ay_[-1]), (ax_[-3], ay_[-3]), color)
             fig.add_annotation(x=x0 * M_TO, y=(y0 + 1.3 * r) * M_TO, text=f"{abs(p.Mz) * KNM:.3g} kN·m",
-                               showarrow=False, font=dict(color=C_LOAD, size=12),
+                               showarrow=False, font=dict(color=color, size=12),
                                bgcolor="rgba(255,255,255,0.75)")
 
 
@@ -372,27 +382,33 @@ def _load_vector(model: Model, dl: DistributedLoad) -> tuple[float, float]:
 
 def _draw_distributed_loads(fig: go.Figure, model: Model, ext: float) -> None:
     # Sumar cargas por (barra, dirección) sin el peso propio (se indica aparte, no se dibuja)
-    acc: dict[tuple[int, LoadDirection], list[float]] = {}
+    acc: dict[tuple[int, LoadDirection, LoadCase], list[float]] = {}
     for d in model.distributed_loads:
         if d.label == SELF_WEIGHT:
             continue
-        a = acc.setdefault((d.member, d.direction), [0.0, 0.0])
+        a = acc.setdefault((d.member, d.direction, d.case), [0.0, 0.0])
         a[0] += d.q_start
         a[1] += d.q_end
-    loads = [DistributedLoad(m, q1, q2, dr) for (m, dr), (q1, q2) in acc.items() if q1 or q2]
+    loads = [DistributedLoad(m, q1, q2, dr, case=case)
+             for (m, dr, case), (q1, q2) in acc.items() if q1 or q2]
     if not loads:
         return
+    for case, color, name in ((LoadCase.DEAD, C_LOAD_D, "D (Muerta)"),
+                              (LoadCase.LIVE, C_LOAD_L, "L (Viva)")):
+        if any(d.case is case for d in loads):
+            fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
+                                     line=dict(color=color, width=3), name=name))
     qmax = max(max(abs(d.q_start), abs(d.q_end)) for d in loads)
     H = 0.10 * ext  # altura de dibujo para qmax
 
     # Agrupar tramos contiguos con igual dirección y continuidad de q para rotular una sola vez
     groups: list[list[DistributedLoad]] = []
-    for d in sorted(loads, key=lambda d: (d.direction.value, d.member)):
+    for d in sorted(loads, key=lambda d: (d.case.value, d.direction.value, d.member)):
         if groups:
             prev = groups[-1][-1]
             slope_prev = (prev.q_end - prev.q_start) / model.member_length(prev.member)
             slope = (d.q_end - d.q_start) / model.member_length(d.member)
-            if (prev.direction is d.direction
+            if (prev.case is d.case and prev.direction is d.direction
                     and model.members[prev.member].j == model.members[d.member].i
                     and math.isclose(prev.q_end, d.q_start, rel_tol=1e-6, abs_tol=1e-9)
                     and math.isclose(slope_prev, slope, rel_tol=1e-6, abs_tol=1e-12)):
@@ -401,6 +417,7 @@ def _draw_distributed_loads(fig: go.Figure, model: Model, ext: float) -> None:
         groups.append([d])
 
     for group in groups:
+        color = C_LOAD_D if group[0].case is LoadCase.DEAD else C_LOAD_L
         outline_x: list[float] = []
         outline_y: list[float] = []
         for d in group:
@@ -417,10 +434,10 @@ def _draw_distributed_loads(fig: go.Figure, model: Model, ext: float) -> None:
                 outline_x.append(tail[0])
                 outline_y.append(tail[1])
                 if abs(qv) > 0.02 * qmax:
-                    _arrow(fig, (bx, by), tail, C_LOAD_Q, width=1.3)
+                    _arrow(fig, (bx, by), tail, color, width=1.3)
         fig.add_trace(go.Scatter(
             x=np.array(outline_x) * M_TO, y=np.array(outline_y) * M_TO, mode="lines",
-            line=dict(color=C_LOAD_Q, width=1.5), hoverinfo="skip", showlegend=False))
+            line=dict(color=color, width=1.5), hoverinfo="skip", showlegend=False))
 
         q1, q2 = group[0].q_start, group[-1].q_end
         uniform = all(math.isclose(d.q_start, d.q_end) for d in group) and math.isclose(q1, q2)
@@ -429,7 +446,7 @@ def _draw_distributed_loads(fig: go.Figure, model: Model, ext: float) -> None:
         label = f"q = {abs(q1):.3g} kN/m" if uniform else f"q = {abs(q1):.3g} → {abs(q2):.3g} kN/m"
         k = len(outline_x) // 2
         fig.add_annotation(x=outline_x[k] * M_TO, y=outline_y[k] * M_TO, text=label, showarrow=False,
-                           yshift=12, font=dict(color=C_LOAD_Q, size=12), bgcolor="rgba(255,255,255,0.75)")
+                           yshift=12, font=dict(color=color, size=12), bgcolor="rgba(255,255,255,0.75)")
 
 
 def auto_deformed_scale(model: Model, results: Results) -> float:
