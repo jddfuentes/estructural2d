@@ -20,6 +20,13 @@ Formulación
   (ux, uy, rz) del nodo. Un GDL con resorte y sin restricción rígida es libre. Reacción del
   resorte sobre la estructura: R = −k·u, sumada a la del vínculo rígido del mismo nudo (si hay).
   Un resorte rotacional en un nudo totalmente articulado le devuelve la rigidez a giro.
+- Hipótesis y combinaciones de carga (`LoadCase` D / L, `LoadCombination`): K se ensambla y
+  factoriza UNA vez; cada hipótesis es un vector de cargas (columna) del mismo sistema K·U = F.
+  `solve_load_cases` devuelve la respuesta de D y de L por separado y `combine_results` las
+  superpone linealmente (γ_D·D + γ_L·L). La combinación es exacta: cada barra guarda sus
+  polinomios N, V, M, u, v (`MemberPolynomials`), se combinan sus coeficientes y se re-muestrea
+  con la misma regla de estaciones que `solve`, de modo que el resultado es el mismo que el de
+  una corrida única con las cargas mayoradas (incluidos los extremos exactos de M y flecha).
 
 Convención de signos de solicitaciones (ejes locales de cada barra, x de i a j):
 - N > 0 tracción.
@@ -30,17 +37,20 @@ Unidades: mm, N, MPa, N·mm.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.polynomial import Polynomial as P
 from numpy.typing import NDArray
 
-from core.model import LoadDirection, Model
+from core.materials import Section
+from core.model import LoadCase, LoadCombination, LoadDirection, Model
 
 FloatArray = NDArray[np.float64]
 
 _COND_LIMIT = 1e12  # número de condición (matriz escalada) para declarar mecanismo
+_TIE_RTOL = 1e-12  # empate numérico de |valor| en `Results.extreme` (diferencias de redondeo)
 _GAUSS_X, _GAUSS_W = np.polynomial.legendre.leggauss(4)
 
 
@@ -51,6 +61,27 @@ class StructuralError(Exception):
 # --------------------------------------------------------------------------- #
 # Resultados
 # --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class MemberPolynomials:
+    """Solución exacta de una barra, para re-muestrear y superponer resultados sin pérdida.
+
+    N, V, M, u, v: coeficientes en potencias crecientes de la abscisa local x [mm]
+    (N [N], V [N], M [N·mm], u y v locales [mm]). El resto es el contexto de muestreo.
+    """
+
+    N: FloatArray
+    V: FloatArray
+    M: FloatArray
+    u: FloatArray
+    v: FloatArray
+    cos: float  # cosenos directores de la barra (x local en ejes globales)
+    sin: float
+    section: Section
+    release_start: bool
+    release_end: bool
+    n_stations: int  # estaciones uniformes usadas por `solve`
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +101,8 @@ class MemberResult:
     sigma_top: FloatArray  # tensión normal fibra superior (y local +) [MPa]
     sigma_bot: FloatArray  # tensión normal fibra inferior [MPa]
     end_forces: FloatArray  # (6,) fuerzas de extremo locales sobre la barra
+    # ---- agregado al final (AGENTS.md §5): solución exacta para combinar hipótesis ---- #
+    polynomials: MemberPolynomials | None = None
 
     @property
     def sigma_abs(self) -> FloatArray:
@@ -101,12 +134,18 @@ class Results:
     members: list[MemberResult] = field(default_factory=list)
 
     def extreme(self, quantity: str) -> Extreme:
-        """Máximo en valor absoluto de: 'N', 'V', 'M', 'sigma', 'deflection', 'uy'."""
+        """Máximo en valor absoluto de: 'N', 'V', 'M', 'sigma', 'deflection', 'uy'.
+
+        Desempate determinista: magnitudes que difieren menos de `_TIE_RTOL` (relativo) se
+        consideran iguales y gana la 1ª estación de la 1ª barra. Así el signo devuelto no depende
+        del redondeo de la plataforma (p. ej. V(0) = +qL/2 y V(L) = −qL/2 en una viga simétrica).
+        """
         best: Extreme | None = None
         for mr in self.members:
             arr = _quantity(mr, quantity)
-            k = int(np.argmax(np.abs(arr)))
-            if best is None or abs(arr[k]) > abs(best.value):
+            mag = np.abs(arr)
+            k = int(np.flatnonzero(mag >= mag.max() * (1.0 - _TIE_RTOL))[0])  # empate: 1ª estación
+            if best is None or mag[k] > abs(best.value) * (1.0 + _TIE_RTOL):  # empate: 1ª barra
                 best = Extreme(
                     value=float(arr[k]), member=mr.member, x=float(mr.x[k]),
                     point=(float(mr.points[k, 0]), float(mr.points[k, 1])),
@@ -256,8 +295,33 @@ def equivalent_nodal_loads(qx: tuple[float, float], qy: tuple[float, float], L: 
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True, slots=True)
+class _Element:
+    k: FloatArray  # rigidez local 6x6 (condensada si hay rótulas)
+    k_full: FloatArray  # rigidez local sin condensar (para condensar las cargas de tramo)
+    T: FloatArray  # rotación global -> local
+    dofs: NDArray[np.intp]  # GDL globales (ux_i, uy_i, rz_i, ux_j, uy_j, rz_j)
+    released: tuple[int, ...]  # giros locales liberados
+    length: float
+
+
+@dataclass(frozen=True, slots=True)
+class _System:
+    """Sistema ensamblado UNA vez y compartido por todas las hipótesis de carga."""
+
+    K: FloatArray  # rigidez global (barras + resortes)
+    k_spring: FloatArray  # rigidez de resortes por GDL (diagonal)
+    free: NDArray[np.bool_]  # GDL que entran al sistema
+    d: FloatArray  # escalado diagonal 1/√K_ii de los GDL libres
+    Ks: FloatArray  # K_ff escalada (condición independiente de unidades)
+    elements: list[_Element]
+
+
 def solve(model: Model, n_stations: int = 41) -> Results:
-    """Resuelve el pórtico plano. Función pura: no modifica `model`.
+    """Resuelve el pórtico plano con TODAS las cargas del modelo (γ = 1 en cada hipótesis).
+
+    Función pura: no modifica `model`. Con sólo cargas D (caso por defecto) es la resolución
+    estándar; con cargas D y L equivale a la combinación 1.0D + 1.0L.
 
     `n_stations`: estaciones uniformes por barra para el postproceso (≥ 2: ambos extremos).
     A ellas se suman siempre las abscisas exactas de M extremo (V = 0) y de flecha extrema.
@@ -266,22 +330,93 @@ def solve(model: Model, n_stations: int = 41) -> Results:
         ValueError: modelo inconsistente o `n_stations` < 2.
         StructuralError: estructura inestable (mecanismo / hipostática).
     """
+    return _solve_cases(model, [None], n_stations)[0]
+
+
+def solve_load_cases(model: Model, n_stations: int = 41) -> dict[LoadCase, Results]:
+    """Respuesta de cada hipótesis de carga por separado, con K ensamblada y factorizada una vez.
+
+    Siempre incluye `LoadCase.DEAD` (respuesta nula si no hay cargas D); incluye `LoadCase.LIVE`
+    sólo si el modelo tiene cargas L. Sin cargas L, `[LoadCase.DEAD]` es idéntico a `solve(model)`.
+
+    Raises:
+        ValueError, StructuralError: como `solve`.
+    """
+    cases = [LoadCase.DEAD] + ([LoadCase.LIVE] if model.has_live_loads() else [])
+    return dict(zip(cases, _solve_cases(model, cases, n_stations), strict=True))
+
+
+def combine_results(res_D: Results, res_L: Results, gamma_D: float, gamma_L: float) -> Results:
+    """Superposición lineal exacta γ_D·D + γ_L·L de dos resultados del mismo modelo.
+
+    Desplazamientos, reacciones y fuerzas de extremo se combinan linealmente; N, V, M, u, v de
+    cada barra se combinan como polinomios y se re-muestrean con la regla de estaciones de
+    `solve` (incluye los extremos exactos de M y de la flecha de la combinación).
+
+    Raises:
+        ValueError: resultados de modelos distintos, sin `MemberPolynomials` o γ no finito.
+    """
+    return _superpose(((res_D, gamma_D), (res_L, gamma_L)))
+
+
+def solve_combinations(
+    model: Model, combinations: Sequence[LoadCombination], n_stations: int = 41
+) -> list[Results]:
+    """Resultados de cada combinación (mismo orden), con una única resolución por hipótesis.
+
+    Sin cargas L, una combinación con γ_D = 1 devuelve exactamente `solve(model)`.
+    """
+    return combine_cases(solve_load_cases(model, n_stations), combinations)
+
+
+def combine_cases(
+    cases: dict[LoadCase, Results], combinations: Sequence[LoadCombination]
+) -> list[Results]:
+    """Combina respuestas ya resueltas por hipótesis (salida de `solve_load_cases`), sin resolver.
+
+    Permite resolver D y L una sola vez y reutilizarlas (p. ej. verificación + diagramas en la UI).
+
+    Raises:
+        ValueError: falta la hipótesis D.
+    """
+    if LoadCase.DEAD not in cases:
+        raise ValueError("Faltan los resultados de la hipótesis D (usar `solve_load_cases`).")
+    res_D, res_L = cases[LoadCase.DEAD], cases.get(LoadCase.LIVE)
+    out: list[Results] = []
+    for comb in combinations:
+        if res_L is not None:
+            out.append(combine_results(res_D, res_L, comb.gamma_D, comb.gamma_L))
+        elif comb.gamma_D == 1.0:
+            out.append(res_D)
+        else:
+            out.append(_superpose(((res_D, comb.gamma_D),)))
+    return out
+
+
+def _solve_cases(model: Model, cases: Sequence[LoadCase | None], n_stations: int) -> list[Results]:
+    """Resuelve K·U = F con una columna de F por hipótesis (`None` = todas las cargas)."""
     if n_stations < 2:
         raise ValueError("La cantidad de estaciones debe ser al menos 2.")
     model.validate()
+    system = _assemble(model)
+    loads = [_case_loads(model, system, case) for case in cases]
+    F = np.column_stack([F_c for F_c, _, _ in loads])
+    U = np.zeros_like(F)
+    free = system.free
+    if free.any():  # (puede no haber GDL libres: p.ej. barra biempotrada sin nodos intermedios)
+        d = system.d[:, None]
+        U[free] = d * np.linalg.solve(system.Ks, d * F[free])
+    return [
+        _results(model, system, U[:, c], F_c, member_q, f_eqs, n_stations)
+        for c, (F_c, member_q, f_eqs) in enumerate(loads)
+    ]
+
+
+def _assemble(model: Model) -> _System:
+    """Ensambla K global (barras + resortes), aplica vínculos y verifica estabilidad."""
     ndof = model.n_dof
     K = np.zeros((ndof, ndof))
-    F = np.zeros(ndof)
-
-    # Cargas distribuidas agrupadas por barra en ejes locales (qx1, qx2, qy1, qy2)
-    member_q = np.zeros((len(model.members), 4))
-    for dl in model.distributed_loads:
-        c, s = model.member_cos_sin(dl.member)
-        (qx1, qx2), (qy1, qy2) = _local_load_components(dl.q_start, dl.q_end, dl.direction, c, s)
-        member_q[dl.member] += (qx1, qx2, qy1, qy2)
-
-    # Ensamblaje
-    elem: list[tuple[FloatArray, FloatArray, FloatArray, NDArray[np.intp]]] = []
+    elements: list[_Element] = []
     for m, mem in enumerate(model.members):
         L = model.member_length(m)
         c, s = model.member_cos_sin(m)
@@ -290,16 +425,9 @@ def solve(model: Model, n_stations: int = 41) -> Results:
         T = rotation_matrix(c, s)
         dofs = np.r_[3 * mem.i : 3 * mem.i + 3, 3 * mem.j : 3 * mem.j + 3]
         K[np.ix_(dofs, dofs)] += T.T @ k @ T
-        qx1, qx2, qy1, qy2 = member_q[m]
-        f_eq = equivalent_nodal_loads((qx1, qx2), (qy1, qy2), L)
         released = released_dofs(mem.release_start, mem.release_end)
-        if released:  # cargas de empotramiento de la barra con rótula (p.ej. 3qL/8, 5qL/8, qL²/8)
-            f_eq = static_condensation(local_stiffness(E, A, I, L), f_eq, released)[1]
-        F[dofs] += T.T @ f_eq
-        elem.append((k, T, f_eq, dofs))
-
-    for p in model.nodal_loads:
-        F[3 * p.node : 3 * p.node + 3] += (p.Fx, p.Fy, p.Mz)
+        k_full = local_stiffness(E, A, I, L) if released else k
+        elements.append(_Element(k, k_full, T, dofs, released, L))
 
     # Apoyos elásticos: rigidez de resorte en la diagonal (GDL desacoplados, ejes globales)
     k_spring = np.zeros(ndof)
@@ -316,7 +444,7 @@ def solve(model: Model, n_stations: int = 41) -> Results:
     # Nudos totalmente articulados: rz sin rigidez -> fuera del sistema (giro nodal informado = 0).
     # Con resorte rotacional (krz > 0) el giro del nudo sí tiene rigidez y queda en el sistema.
     hinged = {n for n in _fully_hinged_nodes(model) if k_spring[3 * n + 2] == 0.0}
-    for p in model.nodal_loads:
+    for p in model.nodal_loads:  # cualquier hipótesis
         if p.node in hinged and p.Mz != 0.0:
             raise StructuralError(
                 f"Nodo {p.node}: momento aplicado en un nudo donde todas las barras tienen rótula; "
@@ -326,8 +454,9 @@ def solve(model: Model, n_stations: int = 41) -> Results:
     for n in hinged:
         free[3 * n + 2] = False
 
-    U = np.zeros(ndof)
-    if free.any():  # (puede no haber GDL libres: p.ej. barra biempotrada sin nodos intermedios)
+    d = np.zeros(0)
+    Ks = np.zeros((0, 0))
+    if free.any():
         Kff = K[np.ix_(free, free)]
         diag = np.diag(Kff)
         if np.any(diag <= 0):
@@ -339,12 +468,53 @@ def solve(model: Model, n_stations: int = 41) -> Results:
                 "Estructura inestable (mecanismo): revisar apoyos. "
                 "Ej.: viga con un solo apoyo, o sólo apoyos móviles sin restricción horizontal."
             )
-        U[free] = d * np.linalg.solve(Ks, d * F[free])
+    return _System(K=K, k_spring=k_spring, free=free, d=d, Ks=Ks, elements=elements)
+
+
+def _case_loads(
+    model: Model, system: _System, case: LoadCase | None
+) -> tuple[FloatArray, FloatArray, list[FloatArray]]:
+    """Vector global F, cargas de tramo locales (qx1, qx2, qy1, qy2) por barra y f_eq locales
+    de la hipótesis `case` (`None` = todas las cargas)."""
+    F = np.zeros(model.n_dof)
+    member_q = np.zeros((len(model.members), 4))
+    for dl in model.distributed_loads:
+        if case is None or dl.case is case:
+            c, s = model.member_cos_sin(dl.member)
+            (qx1, qx2), (qy1, qy2) = _local_load_components(dl.q_start, dl.q_end, dl.direction, c, s)
+            member_q[dl.member] += (qx1, qx2, qy1, qy2)
+
+    f_eqs: list[FloatArray] = []
+    for m, el in enumerate(system.elements):
+        qx1, qx2, qy1, qy2 = member_q[m]
+        f_eq = equivalent_nodal_loads((qx1, qx2), (qy1, qy2), el.length)
+        if el.released:  # cargas de empotramiento de la barra con rótula (p.ej. 3qL/8, 5qL/8, qL²/8)
+            f_eq = static_condensation(el.k_full, f_eq, el.released)[1]
+        F[el.dofs] += el.T.T @ f_eq
+        f_eqs.append(f_eq)
+
+    for p in model.nodal_loads:
+        if case is None or p.case is case:
+            F[3 * p.node : 3 * p.node + 3] += (p.Fx, p.Fy, p.Mz)
+    return F, member_q, f_eqs
+
+
+def _results(
+    model: Model,
+    system: _System,
+    U: FloatArray,
+    F: FloatArray,
+    member_q: FloatArray,
+    f_eqs: list[FloatArray],
+    n_stations: int,
+) -> Results:
+    """Reacciones y postproceso por barra de una hipótesis ya resuelta."""
     # Reacciones sobre la estructura. Vínculo rígido: K·U − F (K incluye resortes, pero u = 0 ahí).
     # GDL libre con resorte: R = −k·u (opuesta al desplazamiento), asignada exacta; equivale a
     # K_barras·U − F salvo el residuo de la solución, así que ΣR + ΣF = 0 se cumple al redondeo.
-    R = K @ U - F - k_spring * U
-    spring_free = free & (k_spring > 0.0)
+    k_spring = system.k_spring
+    R = system.K @ U - F - k_spring * U
+    spring_free = system.free & (k_spring > 0.0)
     R[spring_free] = -k_spring[spring_free] * U[spring_free]
 
     support_nodes = [sup.node for sup in model.supports]
@@ -355,10 +525,66 @@ def solve(model: Model, n_stations: int = 41) -> Results:
     }
 
     members = [
-        _member_results(model, m, k, T, f_eq, U[dofs], member_q[m], n_stations)
-        for m, (k, T, f_eq, dofs) in enumerate(elem)
+        _member_results(model, m, el, f_eqs[m], U[el.dofs], member_q[m], n_stations)
+        for m, el in enumerate(system.elements)
     ]
-    return Results(displacements=U.reshape(-1, 3), reactions=reactions, members=members)
+    return Results(displacements=U.reshape(-1, 3).copy(), reactions=reactions, members=members)
+
+
+def _superpose(terms: Sequence[tuple[Results, float]]) -> Results:
+    """Σ γ·R de resultados del mismo modelo (ver `combine_results`)."""
+    base = terms[0][0]
+    for res, gamma in terms:
+        if not np.isfinite(gamma):
+            raise ValueError(f"Factor de combinación no finito: {gamma}.")
+        if (
+            res.displacements.shape != base.displacements.shape
+            or res.reactions.keys() != base.reactions.keys()
+            or len(res.members) != len(base.members)
+        ):
+            raise ValueError("No se pueden combinar resultados de modelos distintos.")
+
+    U = np.zeros_like(base.displacements)
+    for res, gamma in terms:
+        U += gamma * res.displacements
+    reactions: dict[int, tuple[float, float, float]] = {}
+    for n in base.reactions:
+        rx, ry, mz = (float(sum(g * r.reactions[n][k] for r, g in terms)) for k in range(3))
+        reactions[n] = (rx, ry, mz)
+
+    members: list[MemberResult] = []
+    for m, mr0 in enumerate(base.members):
+        polys: list[tuple[MemberPolynomials, FloatArray, float]] = []
+        for res, gamma in terms:
+            mr = res.members[m]
+            if mr.polynomials is None:
+                raise ValueError(
+                    f"Barra {m}: resultados sin solución polinómica; resolver con `solve` o "
+                    "`solve_load_cases` para poder combinarlos."
+                )
+            if mr.member != mr0.member or mr.length != mr0.length:
+                raise ValueError("No se pueden combinar resultados de modelos distintos.")
+            polys.append((mr.polynomials, mr.end_forces, gamma))
+        p0 = polys[0][0]
+
+        def comb(attr: str, items: list[tuple[MemberPolynomials, FloatArray, float]] = polys) -> P:
+            out = P([0.0])
+            for mp, _, g in items:
+                out = out + g * P(getattr(mp, attr))
+            return out
+
+        end_forces = np.zeros(6)
+        for _, f, g in polys:
+            end_forces += g * f
+        mp_c = MemberPolynomials(
+            N=_coef(comb("N")), V=_coef(comb("V")), M=_coef(comb("M")),
+            u=_coef(comb("u")), v=_coef(comb("v")),
+            cos=p0.cos, sin=p0.sin, section=p0.section,
+            release_start=p0.release_start, release_end=p0.release_end, n_stations=p0.n_stations,
+        )
+        origin = (float(mr0.points[0, 0]), float(mr0.points[0, 1]))
+        members.append(_sample_member(mr0.member, mr0.length, origin, mp_c, end_forces))
+    return Results(displacements=U, reactions=reactions, members=members)
 
 
 def _fully_hinged_nodes(model: Model) -> set[int]:
@@ -374,24 +600,31 @@ def _fully_hinged_nodes(model: Model) -> set[int]:
     return touched - rigid
 
 
+def _coef(p: P) -> FloatArray:
+    return np.asarray(p.coef, dtype=np.float64)
+
+
+def _eval(p: P, x: FloatArray) -> FloatArray:
+    return np.asarray(p(x), dtype=np.float64)
+
+
 def _member_results(
     model: Model,
     m: int,
-    k: FloatArray,
-    T: FloatArray,
+    el: _Element,
     f_eq: FloatArray,
     u_global: FloatArray,
     q: FloatArray,
     n_stations: int,
 ) -> MemberResult:
     mem = model.members[m]
-    L = model.member_length(m)
+    L = el.length
     c, s = model.member_cos_sin(m)
     E, sec = mem.material.E, mem.section
-    ul = T @ u_global
+    ul = el.T @ u_global
     # Fuerzas de extremo sobre la barra (locales). Con rótula, k y f_eq están condensadas:
     # la componente de momento liberada es 0.0 exacto y el giro nodal no interviene.
-    f = k @ ul - f_eq
+    f = el.k @ ul - f_eq
     qx1, qx2, qy1, qy2 = q
 
     # Polinomios exactos en x (local)
@@ -407,19 +640,33 @@ def _member_results(
     c1 = (ul[4] - ul[1] - m2(L)) / L
     vpoly = m2 + P([ul[1], c1])
 
-    # Estaciones: uniformes + extremos exactos de M (V = 0) y de la flecha (v' = 0)
-    xs = np.linspace(0.0, L, n_stations)
-    x = np.unique(np.concatenate([xs, _roots_in(Vpoly, L), _roots_in(vpoly.deriv(), L)]))
+    mp = MemberPolynomials(
+        N=_coef(Npoly), V=_coef(Vpoly), M=_coef(Mpoly), u=_coef(upoly), v=_coef(vpoly),
+        cos=c, sin=s, section=sec, release_start=mem.release_start, release_end=mem.release_end,
+        n_stations=n_stations,
+    )
+    return _sample_member(m, L, model.nodes[mem.i], mp, f)
 
-    Nx, Vx, Mx = Npoly(x), Vpoly(x), Mpoly(x)
+
+def _sample_member(
+    m: int, L: float, origin: tuple[float, float], mp: MemberPolynomials, end_forces: FloatArray
+) -> MemberResult:
+    """Muestrea la solución exacta de la barra (misma regla para `solve` y para combinaciones)."""
+    Npoly, Vpoly, Mpoly, upoly, vpoly = (P(mp.N), P(mp.V), P(mp.M), P(mp.u), P(mp.v))
+    c, s, sec = mp.cos, mp.sin, mp.section
+
+    # Estaciones: uniformes + extremos exactos de M (V = 0) y de la flecha (v' = 0)
+    x = _stations(L, mp.n_stations, np.concatenate([_roots_in(Vpoly, L), _roots_in(vpoly.deriv(), L)]))
+
+    Nx, Vx, Mx = _eval(Npoly, x), _eval(Vpoly, x), _eval(Mpoly, x)
     # Rótulas: M = 0 exacto en el extremo liberado (x = 0 / x = L son siempre estaciones).
     # M(0) = −f[2] ya es 0.0; M(L) se fija para eliminar el redondeo de evaluar el polinomio.
-    if mem.release_start:
+    if mp.release_start:
         Mx[0] = 0.0
-    if mem.release_end:
+    if mp.release_end:
         Mx[-1] = 0.0
-    u, v = upoly(x), vpoly(x)
-    (x1, y1) = model.nodes[mem.i]
+    u, v = _eval(upoly, x), _eval(vpoly, x)
+    x1, y1 = origin
     points = np.column_stack([x1 + c * x, y1 + s * x])
     disp = np.column_stack([c * u - s * v, s * u + c * v])
 
@@ -429,8 +676,19 @@ def _member_results(
         N=Nx, V=Vx, M=Mx, u_local=u, v_local=v, displacement=disp,
         sigma_top=sN - Mx * sec.c_top / sec.I,
         sigma_bot=sN + Mx * sec.c_bot / sec.I,
-        end_forces=f,
+        end_forces=end_forces, polynomials=mp,
     )
+
+
+def _stations(L: float, n_stations: int, extra: FloatArray) -> FloatArray:
+    """Estaciones uniformes más las abscisas `extra`, descartando las que caen a menos de
+    1e-9·L de otra estación (evita duplicados por redondeo; los extremos 0 y L se conservan)."""
+    x = np.linspace(0.0, L, n_stations)
+    tol = 1e-9 * L
+    for r in np.sort(extra):
+        if np.min(np.abs(x - r)) > tol:
+            x = np.append(x, r)
+    return np.sort(x)
 
 
 def _roots_in(p: P, L: float) -> FloatArray:

@@ -1,3 +1,5 @@
+# Fin de línea LF en el repositorio (Windows puede usar CRLF en el árbol de trabajo)
+* text=auto eol=lf
 *.ttf binary
 *.png binary
 *.pdf binary

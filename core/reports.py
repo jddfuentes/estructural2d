@@ -6,7 +6,11 @@ cm³). Las conversiones viven sólo en este módulo y nunca vuelven al resto del
 
 Función pública:
     build_pdf_report(model, results, check, project_title, author, *, date, reference_length,
-                     include_figures, image_bytes) -> bytes
+                     include_figures, include_glossary, image_bytes) -> bytes
+
+`check` puede ser `SafetyCheck` (FS = Sy/σ, cargas sin mayorar) o `CombinationCheck` (LRFD por
+combinaciones D/L): en ese caso portada, bases, resultados y veredicto documentan ELU (combinación
+gobernante, cargas mayoradas) y ELS (flecha con 1.0D + 1.0L) sin mezclar uno con otro.
 
 Pura: no muta sus argumentos y, con `date` fijo, devuelve exactamente los mismos bytes
 (PDF "invariant": sin marcas de tiempo ni ID aleatorio). Única lectura de disco: las fuentes
@@ -56,9 +60,19 @@ from reportlab.platypus import Image as RLImage
 
 from core.glossary import GRAPHIC_SYMBOLS, NOTATION, TERMS
 from core.materials import FAMILY_NOTES, Material, Section, family_warnings
-from core.model import SELF_WEIGHT, DistributedLoad, LoadDirection, Model, Spring, Support, SupportType
+from core.model import (
+    SELF_WEIGHT,
+    DistributedLoad,
+    LoadCase,
+    LoadCombination,
+    LoadDirection,
+    Model,
+    Spring,
+    Support,
+    SupportType,
+)
 from core.solver import MemberResult, Results
-from core.verification import SafetyCheck, Status, default_reference_length
+from core.verification import CombinationCheck, SafetyCheck, Status, default_reference_length
 
 __all__ = ["build_pdf_report"]
 
@@ -169,7 +183,7 @@ STYLES: dict[str, ParagraphStyle] = {
 def build_pdf_report(
     model: Model,
     results: Results,
-    check: SafetyCheck,
+    check: SafetyCheck | CombinationCheck,
     project_title: str = "Memoria de Cálculo",
     author: str = "",
     *,
@@ -182,34 +196,41 @@ def build_pdf_report(
     """Genera la memoria de cálculo y devuelve el PDF como bytes (empieza con b"%PDF").
 
     Args:
-        model, results, check: salida de `solve()` y `check_safety()` para el mismo modelo.
+        model, results, check: salida de `solve()` y `check_safety()` para el mismo modelo, o
+            `check_combinations()`. Con `CombinationCheck` la memoria se arma sólo desde `check`:
+            reacciones, solicitaciones y diagramas (3.1-3.2) con `check.governing_results` (ELU,
+            cargas mayoradas), deformación (3.3) con `check.service_results` (1.0D + 1.0L) y
+            veredicto (4) con `check.verdict` / `check.issues`; `results` no se usa.
         project_title, author: texto libre del encabezado.
         date: fecha del cálculo (por defecto, hoy). Fijarla hace la salida reproducible.
         reference_length: longitud de referencia para la flecha relativa L/δ [mm]
             (por defecto, la extensión horizontal de la estructura).
         include_figures: agrega esquema de cargas, deformada y diagramas N-V-M-σ (vectoriales).
         include_glossary: agrega la sección final "Glosario y simbología".
-        image_bytes: imagen PNG opcional del gráfico principal para incrustar en la portada.
+        image_bytes: PNG opcional del gráfico principal (exportado por la UI con kaleido); se
+            incrusta después de los datos de entrada. El core no lo genera ni depende de Plotly.
     """
     date = date or dt.date.today()
     title = project_title.strip() or "Memoria de Cálculo"
     author = author.strip()
     if reference_length is not None and reference_length <= 0.0:
         raise ValueError("La longitud de referencia para la flecha debe ser positiva [mm].")
+    combo = check if isinstance(check, CombinationCheck) else None
+    flex_check = check.service_check if isinstance(check, CombinationCheck) else check  # flecha: ELS
     L_ref = reference_length if reference_length is not None else (
-        check.reference_length or _horizontal_extent(model)
+        flex_check.reference_length or _horizontal_extent(model)
     )
 
     buf = io.BytesIO()
     doc = _Doc(buf, title=title, author=author or APP_NAME, date=date)
     figs = _Figures() if include_figures else None
     story: list[Flowable] = []
-    story += _title_block(model, check, title, author, date)
+    story += _title_block(model, _criterion(check), title, author, date)
     story += _section_basis(check, L_ref, figs, include_glossary)
     story += _section_inputs(model, figs)
     if image_bytes is not None:
         story += _embedded_plot(image_bytes)
-    story += _section_results(model, results, L_ref, figs)
+    story += _section_results(model, results, L_ref, figs, combo)
     story += _section_verification(check)
     story += _section_limitations(model)
     if include_glossary:
@@ -308,7 +329,17 @@ class _NumberedCanvas(Canvas):
 # --------------------------------------------------------------------------- #
 
 
-def _title_block(model: Model, check: SafetyCheck, title: str, author: str, date: dt.date
+def _criterion(check: SafetyCheck | CombinationCheck) -> str:
+    """Criterio de verificación resumido (portada)."""
+    if isinstance(check, CombinationCheck):
+        n = check.service_check.deflection_limit_ratio
+        return (f"LRFD · {_g('s')}<sub>u</sub> ≤ {_g('f')}·S<sub>y</sub> ({_g('f')} = {check.phi:g})"
+                + (f" · {_g('d')}<sub>ELS</sub> ≤ L/{n:g}" if n > 0 else ""))
+    n = check.deflection_limit_ratio
+    return f"{_g('s')} elástica · FS ≥ {check.fs_min:g}" + (f" · {_g('d')} ≤ L/{n:g}" if n > 0 else "")
+
+
+def _title_block(model: Model, criterion: str, title: str, author: str, date: dt.date
                  ) -> list[Flowable]:
     kind = "Viga recta" if model.is_horizontal_beam() else "Pórtico plano"
     meta = [
@@ -316,9 +347,7 @@ def _title_block(model: Model, check: SafetyCheck, title: str, author: str, date
         ("FECHA", f"{date:%d/%m/%Y}"),
         ("ESTRUCTURA", f"{kind} · {len(model.nodes)} nodos · {len(model.members)} barras"),
         ("MÉTODO", "Rigidez directa · Euler-Bernoulli"),
-        ("CRITERIO", f"{_g('s')} elástica · FS ≥ {check.fs_min:g}"
-                     + (f" · {_g('d')} ≤ L/{check.deflection_limit_ratio:g}"
-                        if check.deflection_limit_ratio > 0 else "")),
+        ("CRITERIO", criterion),
         ("SOFTWARE", APP_NAME),
     ]
     cells = [[_p(k, "meta_k"), _p(v, "meta_v")] for k, v in meta]
@@ -348,7 +377,7 @@ def _title_block(model: Model, check: SafetyCheck, title: str, author: str, date
 
 
 def _section_basis(
-    check: SafetyCheck, L_ref: float, figs: _Figures | None, glossary: bool = False
+    check: SafetyCheck | CombinationCheck, L_ref: float, figs: _Figures | None, glossary: bool = False
 ) -> list[Flowable]:
     items = [
         "Análisis elástico lineal de primer orden por el método directo de rigidez; elementos de "
@@ -358,14 +387,7 @@ def _section_basis(
         "tensiones en MPa.",
         "Ejes globales: X hacia la derecha, Y hacia arriba, momentos positivos antihorarios. "
         "Solicitaciones: N &gt; 0 tracción; M &gt; 0 tracciona la fibra inferior (y local negativa).",
-        f"Criterio de verificación: tensión normal elástica en fibra extrema "
-        f"{_g('s')} = N/A ± M·c/I; FS = S<sub>y</sub> / {_g('s')}<sub>máx</sub> "
-        f"≥ FS<sub>adm</sub> = {check.fs_min:g}.",
-        (f"Criterio de servicio: flecha {_g('d')}<sub>máx</sub> ≤ {_g('d')}<sub>adm</sub> = "
-         f"L/{check.deflection_limit_ratio:g}, con {_g('d')}<sub>máx</sub> el desplazamiento total máximo "
-         f"de la estructura y L = {L_ref * _M:.3f} m."
-         if check.deflection_limit_ratio > 0 else
-         "Criterio de servicio: sin límite de flecha (sólo se informa L/δ)."),
+        *_criteria_items(check, L_ref),
     ]
     if glossary:
         items.append("La notación, los símbolos gráficos y los términos usados se detallan en la "
@@ -376,6 +398,40 @@ def _section_basis(
                             "Convenciones de signos usadas en toda la memoria: ejes globales, "
                             "solicitaciones positivas sobre un elemento dx y ejes locales de barra."))
     return out
+
+
+_SPRING_TXT = {"kx": "Kx", "ky": "Ky", "krz": "Krz"}
+
+
+def _criteria_items(check: SafetyCheck | CombinationCheck, L_ref: float) -> list[str]:
+    """Viñetas de criterios de verificación de §1 (resistencia y servicio)."""
+    s, d, f = _g("s"), _g("d"), _g("f")
+    if isinstance(check, CombinationCheck):
+        n = check.service_check.deflection_limit_ratio
+        svc = check.service_combination.name
+        uls = " y ".join(comb.name for comb, _ in check.strength_checks)
+        return [
+            "Hipótesis de carga D (permanente, incluye peso propio) y L (sobrecarga de uso); "
+            "combinaciones por superposición lineal (CIRSOC 301-2005 §A.4.2 / AISC 360-16 §B2).",
+            f"Resistencia (ELU, LRFD): envolvente de {uls} con cargas mayoradas; tensión normal "
+            f"elástica en fibra extrema {s}<sub>u</sub> = N<sub>u</sub>/A ± M<sub>u</sub>·c/I "
+            f"≤ {f}·S<sub>y</sub>, con {f} = {check.phi:g} (AISC 360-16 §F1). Gobierna la combinación "
+            f"de máxima utilización {s}<sub>u</sub> / ({f}·S<sub>y</sub>).",
+            (f"Servicio (ELS): flecha bajo {svc} (cargas sin mayorar), {d}<sub>máx</sub> ≤ "
+             f"{d}<sub>adm</sub> = L/{n:g}, es decir L/{d} ≥ {n:g}, con {d}<sub>máx</sub> el desplazamiento "
+             f"total máximo de la estructura y L = {L_ref * _M:.3f} m."
+             if n > 0 else
+             f"Servicio (ELS): flecha bajo {svc} (cargas sin mayorar), sin límite (sólo se informa L/{d})."),
+        ]
+    return [
+        f"Criterio de verificación: tensión normal elástica en fibra extrema "
+        f"{s} = N/A ± M·c/I; FS = S<sub>y</sub> / {s}<sub>máx</sub> ≥ FS<sub>adm</sub> = {check.fs_min:g}.",
+        (f"Criterio de servicio: flecha {d}<sub>máx</sub> ≤ {d}<sub>adm</sub> = "
+         f"L/{check.deflection_limit_ratio:g}, con {d}<sub>máx</sub> el desplazamiento total máximo "
+         f"de la estructura y L = {L_ref * _M:.3f} m."
+         if check.deflection_limit_ratio > 0 else
+         "Criterio de servicio: sin límite de flecha (sólo se informa L/δ)."),
+    ]
 
 
 def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
@@ -426,22 +482,24 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
     out.append(_p("Valores con signo en ejes globales (Fy &lt; 0 y q &lt; 0: hacia abajo).", "note"))
     if model.nodal_loads:
         rows = [[str(p.node), f"{model.nodes[p.node][0] * _M:.3f}", f"{model.nodes[p.node][1] * _M:.3f}",
-                 _num(p.Fx * _KN), _num(p.Fy * _KN), _num(p.Mz * _KNM)] for p in model.nodal_loads]
+                 _CASE_TXT[p.case], _num(p.Fx * _KN), _num(p.Fy * _KN), _num(p.Mz * _KNM)]
+                for p in model.nodal_loads]
         out.append(_p("<b>Cargas concentradas</b>", "body"))
-        out.append(_table(["Nodo", "x [m]", "y [m]", "Fx [kN]", "Fy [kN]", "Mz [kN·m]"], rows,
-                          [0.12, 0.16, 0.16, 0.18, 0.18, 0.20], num_cols={1, 2, 3, 4, 5}))
+        out.append(_table(["Nodo", "x [m]", "y [m]", "Hipótesis", "Fx [kN]", "Fy [kN]", "Mz [kN·m]"], rows,
+                          [0.10, 0.14, 0.14, 0.14, 0.16, 0.16, 0.16], num_cols={1, 2, 4, 5, 6}))
     groups = _group_distributed(model)
     if groups:
         out.append(Spacer(1, 2 * mm))
         out.append(_p("<b>Cargas distribuidas</b>", "body"))
         beam = model.is_horizontal_beam()
         span_head = "Tramo x [m]" if beam else "Desde → hasta (x; y) [m]"
-        rows = [[g.origin, g.members,
+        rows = [[g.origin, g.members, _CASE_TXT[g.case],
                  f"{g.p0[0] * _M:.3f} → {g.p1[0] * _M:.3f}" if beam else
                  f"({g.p0[0] * _M:.2f}; {g.p0[1] * _M:.2f}) → ({g.p1[0] * _M:.2f}; {g.p1[1] * _M:.2f})",
                  _DIR_TXT[g.direction], _num(g.q0), _num(g.q1)] for g in groups]  # N/mm == kN/m
-        out.append(_table(["Origen", "Barras", span_head, "Dirección", "q ini [kN/m]", "q fin [kN/m]"],
-                          rows, [0.14, 0.09, 0.29, 0.18, 0.15, 0.15], num_cols={4, 5}))
+        out.append(_table(["Origen", "Barras", "Hipótesis", span_head, "Dirección",
+                           "q ini [kN/m]", "q fin [kN/m]"],
+                          rows, [0.12, 0.08, 0.12, 0.25, 0.16, 0.14, 0.13], num_cols={5, 6}))
     if not model.nodal_loads and not groups:
         out.append(_p("Sin cargas aplicadas.", "body"))
 
@@ -476,9 +534,21 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
     return out
 
 
-def _section_results(model: Model, results: Results, L_ref: float, figs: _Figures | None
-                     ) -> list[Flowable]:
+def _section_results(model: Model, results: Results, L_ref: float, figs: _Figures | None,
+                     combo: CombinationCheck | None = None) -> list[Flowable]:
+    """§3. Con `combo`: 3.1-3.2 de la combinación ELU gobernante y 3.3 de la de servicio."""
     out: list[Flowable] = []
+    head: list[Flowable] = [_h1("3. Resultados")]
+    comb: LoadCombination | None = None
+    deflection_results = results
+    if combo is not None:
+        comb = combo.governing
+        results = combo.governing_results
+        deflection_results = combo.service_results
+        head.append(_p(f"Reacciones, solicitaciones y diagramas (3.1 y 3.2): combinación ELU gobernante "
+                       f"<b>{escape(comb.name)}</b>, cargas mayoradas. Deformación (3.3): combinación de "
+                       f"servicio <b>{escape(combo.service_combination.name)}</b>, cargas sin mayorar.",
+                       "note"))
 
     # 3.1 Reacciones + equilibrio global
     rows, sx, sy = [], 0.0, 0.0
@@ -489,21 +559,24 @@ def _section_results(model: Model, results: Results, L_ref: float, figs: _Figure
         sx, sy = sx + Rx, sy + Ry
         support = supports.get(node)
         spring = springs.get(node)
-        kind = _support_label(support, spring, with_values=False)
+        active = spring.active(support.type if support else None) if spring else None
+        kind = _support_label(support, active if active is not None and not active.is_null else None,
+                              with_values=False)
         show_mz = (support is not None and support.type.restrained_dofs[2]) or (
-            spring is not None and spring.krz > 0
+            active is not None and active.krz > 0
         )
         rows.append([str(node), kind, _num(Rx * _KN), _num(Ry * _KN),
                      _num(Mz * _KNM) if show_mz else "—"])
     rows.append(["<b>Σ</b>", "", f"<b>{_num(sx * _KN)}</b>", f"<b>{_num(sy * _KN)}</b>", ""])
-    Fx, Fy = _applied_resultant(model)
+    Fx, Fy = _applied_resultant(model, comb)
     scale = max(abs(Fx), abs(Fy), 1.0)
+    loads_txt = "cargas aplicadas" if comb is None else f"cargas mayoradas ({escape(comb.name)})"
     out.append(KeepTogether([
-        _h1("3. Resultados"),  # dentro del bloque para que el título no quede huérfano
+        *head,  # dentro del bloque para que el título no quede huérfano
         _h2("3.1 Reacciones de vínculo"),
         _table(["Nodo", "Tipo", "Rx [kN]", "Ry [kN]", "Mz [kN·m]"], rows,
                [0.12, 0.28, 0.20, 0.20, 0.20], num_cols={2, 3, 4}, total_row=True),
-        _p(f"Equilibrio global — cargas aplicadas: ΣFx = {_num(Fx * _KN)} kN, ΣFy = {_num(Fy * _KN)} kN. "
+        _p(f"Equilibrio global — {loads_txt}: ΣFx = {_num(Fx * _KN)} kN, ΣFy = {_num(Fy * _KN)} kN. "
            f"Residuo relativo |ΣR + ΣF| / |F| = {max(abs(sx + Fx), abs(sy + Fy)) / scale:.1e}.", "note"),
     ]))
 
@@ -524,8 +597,10 @@ def _section_results(model: Model, results: Results, L_ref: float, figs: _Figure
     if figs is not None:
         out += _diagram_figures(model, results, figs)
 
-    # 3.3 Deformación
-    d = results.extreme("deflection")
+    # 3.3 Deformación (con combinaciones: servicio 1.0D + 1.0L, nunca la combinación mayorada)
+    d = deflection_results.extreme("deflection")
+    h_def = ("3.3 Deformación" if combo is None
+             else f"3.3 Deformación de servicio ({escape(combo.service_combination.name)})")
     rel = f"L/{L_ref / abs(d.value):,.0f}" if abs(d.value) > 1e-12 else "—"
     rows = [
         [f"Desplazamiento máximo {_g('d')}<sub>máx</sub>", f"{abs(d.value):,.2f} mm"],
@@ -533,15 +608,17 @@ def _section_results(model: Model, results: Results, L_ref: float, figs: _Figure
         ["Longitud de referencia L", f"{L_ref * _M:.3f} m"],
         [f"Flecha relativa L/{_g('d')}", f"<b>{rel}</b>"],
     ]
-    out.append(KeepTogether([_h2("3.3 Deformación"), _kv_table(rows)]))
+    out.append(KeepTogether([_h2(h_def), _kv_table(rows)]))
     if figs is not None:
-        drawing, k = _fig_deformed(model, results, CONTENT_W)
+        drawing, k = _fig_deformed(model, deflection_results, CONTENT_W)
         out.append(figs.add(drawing, f"Deformada amplificada ×{k:g} (en gris, la geometría sin deformar). "
                                      f"{_g('d')}<sub>máx</sub> = {abs(d.value):,.2f} mm."))
     return out
 
 
-def _section_verification(check: SafetyCheck) -> list[Flowable]:
+def _section_verification(check: SafetyCheck | CombinationCheck) -> list[Flowable]:
+    if isinstance(check, CombinationCheck):
+        return _section_verification_combinations(check)
     fg, bg = STATUS_COLORS[check.status]
     fs_txt = "∞" if math.isinf(check.fs) else f"{check.fs:.2f}"
     rows = [
@@ -577,6 +654,69 @@ def _section_verification(check: SafetyCheck) -> list[Flowable]:
         ("LEFTPADDING", (0, 0), (-1, -1), 10),
     ]))
     return [KeepTogether([_h1("4. Verificación de seguridad"), _kv_table(rows), Spacer(1, 3 * mm), verdict])]
+
+
+def _combination_verdict_text(check: CombinationCheck) -> tuple[Status, str]:
+    """Color y texto del veredicto global por combinaciones (de `CombinationCheck.verdict`)."""
+    severity, label = check.verdict
+    s, f, gov = _g("s"), _g("f"), escape(check.governing.name)
+    detail = {
+        "FLUENCIA": f"{s}<sub>u</sub> supera S<sub>y</sub> (ELU {gov})",
+        "NO VERIFICA": f"{s}<sub>u</sub> &gt; {f}·S<sub>y</sub> (ELU {gov})",
+        "ALERTA": f"flecha de servicio mayor a la admisible (ELS {escape(check.service_combination.name)})",
+    }.get(label)
+    head = VERDICT_TEXT[Status.OK] if label == "VERIFICA" else label
+    return severity, head if detail is None else f"{head} — {detail}"
+
+
+def _section_verification_combinations(check: CombinationCheck) -> list[Flowable]:
+    """§4 con combinaciones: tabla ELU por combinación, ELS de servicio y veredicto global."""
+    s, d, f = _g("s"), _g("d"), _g("f")
+    sv = check.service_check
+    uls_rows = []
+    for comb, chk in check.strength_checks:
+        name = escape(comb.name) + (" (gobierna)" if comb is check.governing else "")
+        uls_rows.append([f"<b>{name}</b>" if comb is check.governing else name,
+                         f"{chk.sigma_max:,.1f}", f"{check.phi * chk.sy:,.1f}", f"{chk.utilization:.0%}",
+                         f"barra {chk.member}, ({chk.point[0] * _M:.3f}; {chk.point[1] * _M:.3f}) m"])
+    uls_table = _table(["Combinación ELU", f"{s}<sub>u</sub> [MPa]", f"{f}·S<sub>y</sub> [MPa]",
+                        "Utilización", "Ubicación crítica"], uls_rows,
+                       [0.26, 0.15, 0.14, 0.13, 0.32], num_cols={1, 2, 3})
+    rows = [
+        ["Combinación gobernante ELU", f"<b>{escape(check.governing.name)}</b>"],
+        ["Criterio de resistencia (LRFD)", f"{s}<sub>u</sub> ≤ {f}·S<sub>y</sub>, {f} = {check.phi:g}"],
+        [f"Utilización {s}<sub>u</sub> / ({f}·S<sub>y</sub>)", f"<b>{check.utilization:.0%}</b>"],
+        [f"Flecha máxima ELS {d}<sub>máx</sub> ({escape(check.service_combination.name)})",
+         f"{sv.delta_max:,.2f} mm"],
+        [f"Flecha relativa L/{d} (L = {sv.reference_length * _M:.3f} m)",
+         f"<b>L/{sv.deflection_ratio:,.0f}</b>" if math.isfinite(sv.deflection_ratio) else "—"],
+    ]
+    if sv.deflection_limit_ratio > 0:
+        rows += [
+            [f"Flecha admisible {d}<sub>adm</sub> = L/N",
+             f"L/{sv.deflection_limit_ratio:g} = {sv.delta_adm:,.2f} mm"],
+            [f"Aprovechamiento {d}<sub>máx</sub> / {d}<sub>adm</sub>", f"{sv.delta_max / sv.delta_adm:.0%}"],
+        ]
+    else:
+        rows.append([f"Flecha admisible {d}<sub>adm</sub>", "sin límite"])
+    severity, text = _combination_verdict_text(check)
+    fg, bg = STATUS_COLORS[severity]
+    v_style = ParagraphStyle("verdict_comb", parent=STYLES["body"], fontSize=11, leading=14, textColor=fg)
+    i_style = ParagraphStyle("verdict_issue", parent=STYLES["body"], fontSize=8.5, leading=11, textColor=fg)
+    cells: list[list[Flowable]] = [[Paragraph(f"<b>VEREDICTO: {text}</b>", v_style)]]
+    cells += [[Paragraph(f"• {_rl(issue)}", i_style)] for issue in check.issues]
+    verdict = Table(cells, colWidths=[CONTENT_W])
+    verdict.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), bg),
+        ("LINEBEFORE", (0, 0), (0, -1), 4, fg),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, 0), 7),
+        ("BOTTOMPADDING", (0, -1), (-1, -1), 7),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    return [KeepTogether([_h1("4. Verificación de seguridad"), _kv_table(rows), Spacer(1, 2 * mm),
+                          uls_table, Spacer(1, 3 * mm), verdict])]
 
 
 def _families(model: Model) -> list[str]:
@@ -620,6 +760,13 @@ def _icon(kind: str, w: float = 54.0, h: float = 26.0) -> Drawing:
         for x in xs:
             _arrow(d, (float(x), h - 4.0), (float(x), 6.2), C_LOAD_Q, 0.7, 3.4)
         _line(d, (8.0, h - 4.0), (w - 8.0, h - 4.0), C_LOAD_Q, 0.9)
+    elif kind == "dist_live":
+        _line(d, (6.0, 5.0), (w - 6.0, 5.0), C_MEMBER, 2.0)
+        _line(d, (8.0, 13.0), (w - 8.0, 13.0), C_LOAD_Q, 0.9)  # D
+        for x in np.linspace(8.0, w - 8.0, 5):
+            _arrow(d, (float(x), 13.0), (float(x), 6.2), C_LOAD_Q, 0.7, 3.0)
+            _arrow(d, (float(x), h - 2.0), (float(x), 14.2), C_LOAD_L, 0.7, 3.0)  # L apilada
+        _line(d, (8.0, h - 2.0), (w - 8.0, h - 2.0), C_LOAD_L, 0.9)
     elif kind == "moment":
         r = 8.0
         arc = [(mid + r * math.cos(t), h / 2 + r * math.sin(t)) for t in np.linspace(-0.8, 3.9, 28)]
@@ -663,7 +810,7 @@ def _icon(kind: str, w: float = 54.0, h: float = 26.0) -> Drawing:
 
 
 _SCRIPT_RE = re.compile(r"([_^])\{([^}]*)\}")
-_GREEK_RE = re.compile("[σδνρθΣ]")
+_GREEK_RE = re.compile("[σδνρθΣφγ]")
 
 
 def _rl(text: str) -> str:
@@ -738,12 +885,14 @@ def _section_glossary() -> list[Flowable]:
 
 _DIR_TXT = {LoadDirection.GLOBAL_Y: "Vertical (Y)", LoadDirection.GLOBAL_X: "Horizontal (X)",
             LoadDirection.LOCAL_Y: "Perpendicular a barra"}
+_CASE_TXT = {LoadCase.DEAD: "D (Muerta)", LoadCase.LIVE: "L (Viva)"}
 
 
 @dataclass(frozen=True, slots=True)
 class _LoadGroup:
     origin: str
     members: str
+    case: LoadCase
     p0: tuple[float, float]  # punto inicial (x, y) [mm]
     p1: tuple[float, float]  # punto final (x, y) [mm]
     direction: LoadDirection
@@ -754,12 +903,12 @@ class _LoadGroup:
 def _chain_loads(model: Model, loads: Sequence[DistributedLoad]) -> list[list[DistributedLoad]]:
     """Une tramos contiguos de una misma carga (el builder la parte en barras)."""
     groups: list[list[DistributedLoad]] = []
-    for d in sorted(loads, key=lambda d: (d.label, d.direction.value, d.member)):
+    for d in sorted(loads, key=lambda d: (d.case.value, d.label, d.direction.value, d.member)):
         if groups:
             p = groups[-1][-1]
             sp = (p.q_end - p.q_start) / model.member_length(p.member)
             sd = (d.q_end - d.q_start) / model.member_length(d.member)
-            if (p.label == d.label and p.direction is d.direction
+            if (p.case is d.case and p.label == d.label and p.direction is d.direction
                     and model.members[p.member].j == model.members[d.member].i
                     and math.isclose(p.q_end, d.q_start, rel_tol=1e-6, abs_tol=1e-9)
                     and math.isclose(sp, sd, rel_tol=1e-6, abs_tol=1e-12)):
@@ -777,18 +926,21 @@ def _group_distributed(model: Model) -> list[_LoadGroup]:
         ids = f"{g[0].member}" if len(g) == 1 else f"{g[0].member}–{g[-1].member}"
         out.append(_LoadGroup(
             origin="Peso propio" if g[0].label == SELF_WEIGHT else (g[0].label or "Usuario"),
-            members=ids, p0=model.nodes[first.i], p1=model.nodes[last.j],
+            members=ids, case=g[0].case, p0=model.nodes[first.i], p1=model.nodes[last.j],
             direction=g[0].direction, q0=g[0].q_start, q1=g[-1].q_end,
         ))
     return out
 
 
-def _applied_resultant(model: Model) -> tuple[float, float]:
-    """Resultante global (Fx, Fy) [N] de todas las cargas aplicadas."""
-    Fx = sum(p.Fx for p in model.nodal_loads)
-    Fy = sum(p.Fy for p in model.nodal_loads)
+def _applied_resultant(model: Model, comb: LoadCombination | None = None) -> tuple[float, float]:
+    """Resultante global (Fx, Fy) [N] de las cargas aplicadas; con `comb`, mayoradas γ_D·D + γ_L·L."""
+    def g(case: LoadCase) -> float:
+        return 1.0 if comb is None else comb.factor(case)
+
+    Fx = sum(g(p.case) * p.Fx for p in model.nodal_loads)
+    Fy = sum(g(p.case) * p.Fy for p in model.nodal_loads)
     for d in model.distributed_loads:
-        Q = 0.5 * (d.q_start + d.q_end) * model.member_length(d.member)
+        Q = g(d.case) * 0.5 * (d.q_start + d.q_end) * model.member_length(d.member)
         c, s = model.member_cos_sin(d.member)
         gx, gy = {LoadDirection.GLOBAL_X: (1.0, 0.0), LoadDirection.GLOBAL_Y: (0.0, 1.0),
                   LoadDirection.LOCAL_Y: (-s, c)}[d.direction]
@@ -809,8 +961,10 @@ def _horizontal_extent(model: Model) -> float:
 C_MEMBER = colors.HexColor("#2B3440")
 C_GHOST = colors.HexColor("#B8C0CA")
 C_SUPPORT = colors.HexColor("#5B6573")
-C_LOAD = colors.HexColor("#C2410C")
-C_LOAD_Q = colors.HexColor("#EA580C")
+C_LOAD = colors.HexColor("#C2410C")  # hipótesis D (concentradas y rótulos)
+C_LOAD_Q = colors.HexColor("#EA580C")  # hipótesis D (distribuidas)
+C_LOAD_L = colors.HexColor("#7C3AED")  # hipótesis L (misma convención que ui/plots.py)
+_GAP_STACK = 3.0  # [pt] separación de la carga L apilada sobre la D de la misma barra
 C_SPRING = colors.HexColor("#B45309")
 C_DEFORMED = colors.HexColor("#2563EB")
 C_DIM = colors.HexColor("#7B8794")
@@ -1003,10 +1157,12 @@ def _draw_support(d: Drawing, p: Pt, kind: SupportType, direction: Pt, u: float 
 
 
 def _draw_supports(d: Drawing, model: Model, view: _View) -> None:
+    types = {sup.node: sup.type for sup in model.supports}
     for sup in model.supports:
         _draw_support(d, view(*model.nodes[sup.node]), sup.type, _member_dir(model, sup.node))
     for spring in model.springs:
-        _draw_spring(d, view(*model.nodes[spring.node]), spring, _spring_side(model, spring.node))
+        _draw_spring(d, view(*model.nodes[spring.node]), spring, types.get(spring.node),
+                     side=_spring_side(model, spring.node))
 
 
 def _spring_side(model: Model, node: int) -> float:
@@ -1025,27 +1181,53 @@ def _spring_label(spring: Spring) -> str:
 
 
 def _support_label(support: Support | None, spring: Spring | None, with_values: bool = True) -> str:
-    """Tipo de vínculo de un nodo: rígido, elástico o combinado (`Libre` + resorte = elástico)."""
-    if spring is None:
-        return support.type.value.capitalize() if support is not None else "—"
-    elastic = "Elástico: " + _spring_label(spring) if with_values else "elástico"
-    if support is None or support.type is SupportType.FREE:
-        return elastic[0].upper() + elastic[1:]
-    return f"{support.type.value.capitalize()} + {elastic}"
+    """Tipo de vínculo de un nodo: rígido, elástico o combinado (`Libre` + resorte = elástico).
+
+    Sólo cuentan las rigideces que trabajan (`Spring.active`); con `with_values`, las que caen sobre un
+    GDL ya restringido por el apoyo rígido se informan como "sin efecto".
+    """
+    stype = support.type if support is not None else None
+    active = spring.active(stype) if spring is not None else None
+    inert = spring.inert(stype) if spring is not None else ()
+    if active is None or active.is_null:
+        base = support.type.value.capitalize() if support is not None else "—"
+    else:
+        elastic = "Elástico: " + _spring_label(active) if with_values else "elástico"
+        if support is None or support.type is SupportType.FREE:
+            base = elastic[0].upper() + elastic[1:]
+        else:
+            base = f"{support.type.value.capitalize()} + {elastic}"
+    if with_values and inert:
+        base += " · " + "; ".join(f"{_SPRING_TXT[n]} sin efecto (GDL restringido)" for n in inert)
+    return base
 
 
-def _draw_spring(d: Drawing, p: Pt, spring: Spring, side: float = -1.0, u: float = 7.5) -> None:
-    """Dibuja los resortes nodales con su anclaje; Kx hacia afuera de la estructura (`side`)."""
+def _draw_spring(d: Drawing, p: Pt, spring: Spring, support: SupportType | None = None,
+                 u: float = 7.5, side: float = -1.0) -> None:
+    """Dibuja sólo los resortes que trabajan, sin superponer el símbolo del apoyo rígido.
+
+    Kx a la altura del nudo, hacia afuera de la estructura (`side`). Con apoyo rígido en el nudo
+    (articulado / móvil): Ky se corre 1,5·u a la derecha (unido al nudo por un tramo) y Krz se dibuja
+    como arco superior, fuera del triángulo.
+    """
+    spring = spring.active(support)
+    mixed = support is not None and support is not SupportType.FREE
     if spring.kx > 0:
         x_end = p[0] + side * 2.4 * u
         _zigzag(d, (p, (x_end, p[1])), horizontal=True, u=u)
         _line(d, (x_end, p[1] - u), (x_end, p[1] + u), C_SUPPORT, 1.0)
     if spring.ky > 0:
+        x = p[0] + (1.5 * u if mixed else 0.0)
+        if mixed:
+            _line(d, p, (x, p[1]), C_SPRING, 0.8)
         y_end = p[1] - 2.4 * u
-        _zigzag(d, (p, (p[0], y_end)), horizontal=False, u=u)
-        _line(d, (p[0] - u, y_end), (p[0] + u, y_end), C_SUPPORT, 1.0)
+        _zigzag(d, ((x, p[1]), (x, y_end)), horizontal=False, u=u)
+        _line(d, (x - u, y_end), (x + u, y_end), C_SUPPORT, 1.0)
     if spring.krz > 0:
-        d.add(Circle(p[0], p[1], 0.85 * u, fillColor=None, strokeColor=C_SPRING, strokeWidth=1.2))
+        r = 0.85 * u
+        a0, a1 = (-0.15 * math.pi, 1.15 * math.pi) if mixed else (-0.3 * math.pi, 1.5 * math.pi)
+        _poly(d, [(p[0] + r * math.cos(t), p[1] + r * math.sin(t)) for t in np.linspace(a0, a1, 28)],
+              C_SPRING, 1.2)
 
 
 def _zigzag(d: Drawing, ends: tuple[Pt, Pt], horizontal: bool, u: float = 7.5) -> None:
@@ -1069,15 +1251,31 @@ def _load_dir(model: Model, dl: DistributedLoad) -> Pt:
 
 
 def _user_dist_loads(model: Model) -> list[DistributedLoad]:
-    """Cargas distribuidas de usuario sumadas por (barra, dirección); sin peso propio."""
-    acc: dict[tuple[int, LoadDirection], list[float]] = {}
+    """Cargas distribuidas de usuario sumadas por (barra, dirección, hipótesis); sin peso propio."""
+    acc: dict[tuple[int, LoadDirection, LoadCase], list[float]] = {}
     for dl in model.distributed_loads:
         if dl.label == SELF_WEIGHT:
             continue
-        a = acc.setdefault((dl.member, dl.direction), [0.0, 0.0])
+        a = acc.setdefault((dl.member, dl.direction, dl.case), [0.0, 0.0])
         a[0] += dl.q_start
         a[1] += dl.q_end
-    return [DistributedLoad(m, q1, q2, direction) for (m, direction), (q1, q2) in acc.items() if q1 or q2]
+    return [DistributedLoad(m, q1, q2, direction, case=case)
+            for (m, direction, case), (q1, q2) in acc.items() if q1 or q2]
+
+
+def _stack_offsets(loads: Sequence[DistributedLoad]) -> dict[tuple[int, LoadDirection], float]:
+    """|q| máximo de la carga D por (barra, dirección), para apilar encima la L del mismo sentido."""
+    out: dict[tuple[int, LoadDirection], float] = {}
+    for dl in loads:
+        if dl.case is LoadCase.DEAD:
+            key = (dl.member, dl.direction)
+            out[key] = max(out.get(key, 0.0), abs(dl.q_start), abs(dl.q_end))
+    return out
+
+
+def _case_colors(case: LoadCase) -> tuple[colors.Color, colors.Color]:
+    """(rótulo/concentradas, distribuidas) de la hipótesis: D naranja, L violeta."""
+    return (C_LOAD, C_LOAD_Q) if case is LoadCase.DEAD else (C_LOAD_L, C_LOAD_L)
 
 
 def _draw_dist_loads(d: Drawing, model: Model, view: _View, H: float = 20.0) -> None:
@@ -1085,62 +1283,96 @@ def _draw_dist_loads(d: Drawing, model: Model, view: _View, H: float = 20.0) -> 
     if not loads:
         return
     qmax = max(max(abs(dl.q_start), abs(dl.q_end)) for dl in loads)
+    stack = _stack_offsets(loads)
+
+    def same_sense(dl: DistributedLoad) -> bool:  # L del mismo sentido que la D de su barra
+        d_sum = sum(x.q_start + x.q_end for x in loads if x.case is LoadCase.DEAD
+                    and x.member == dl.member and x.direction is dl.direction)
+        return d_sum * (dl.q_start + dl.q_end) > 0
+
+    stacked = {(dl.member, dl.direction) for dl in loads
+               if dl.case is LoadCase.LIVE and (dl.member, dl.direction) in stack and same_sense(dl)}
     busy = [view(*model.nodes[p.node]) for p in model.nodal_loads]  # zonas con rótulo de carga puntual
     for chain in _chain_loads(model, loads):
+        case = chain[0].case
+        c_text, c_line = _case_colors(case)
         outline: list[Pt] = []
+        heads: list[Pt] = []  # puntos sobre la barra (para rotular la D del lado opuesto si hay L encima)
         for dl in chain:
             mem = model.members[dl.member]
             a, b = view(*model.nodes[mem.i]), view(*model.nodes[mem.j])
             gx, gy = _load_dir(model, dl)
+            # L sobre una D del mismo sentido en la misma barra: se apila encima (no se superponen)
+            base = 0.0
+            if case is LoadCase.LIVE and (dl.member, dl.direction) in stacked:
+                base = math.copysign(H * stack[(dl.member, dl.direction)] / qmax + _GAP_STACK,
+                                     dl.q_start + dl.q_end)
             n = max(2, round(math.hypot(b[0] - a[0], b[1] - a[1]) / 24.0) + 1)
             for k in range(n):
                 t = k / (n - 1)
                 q = dl.q_start + (dl.q_end - dl.q_start) * t
-                head = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+                head = (a[0] + (b[0] - a[0]) * t - gx * base, a[1] + (b[1] - a[1]) * t - gy * base)
                 h = H * q / qmax
                 tail = (head[0] - gx * h, head[1] - gy * h)
                 outline.append(tail)
+                heads.append(head)
                 if abs(q) > 0.03 * qmax:
                     gap = math.copysign(1.2, q)  # la punta no tapa la barra
-                    _arrow(d, tail, (head[0] - gx * gap, head[1] - gy * gap), C_LOAD_Q, 0.7, 3.6)
-        _poly(d, outline, C_LOAD_Q, 0.9)
+                    _arrow(d, tail, (head[0] - gx * gap, head[1] - gy * gap), c_line, 0.7, 3.6)
+        _poly(d, outline, c_line, 0.9)
         q1, q2 = chain[0].q_start, chain[-1].q_end
         uniform = all(math.isclose(c.q_start, c.q_end) for c in chain) and math.isclose(q1, q2)
-        text = f"q = {abs(q1):.3g} kN/m" if uniform else f"q = {abs(q1):.3g} {_TO} {abs(q2):.3g} kN/m"
+        sym = f"q{case.value}" if model.has_live_loads() else "q"
+        text = (f"{sym} = {abs(q1):.3g} kN/m" if uniform
+                else f"{sym} = {abs(q1):.3g} {_TO} {abs(q2):.3g} kN/m")
         gx, gy = _load_dir(model, chain[0])
         sgn = 1.0 if (q1 + q2) >= 0 else -1.0
         # Rótulo en el punto del contorno más alejado de las cargas puntuales (evita superposición)
-        n_o = len(outline)
-        cands = [outline[min(n_o - 1, round(f * (n_o - 1)))] for f in (0.5, 0.3, 0.7, 0.15, 0.85)]
-        mx, my = next((c for c in cands if all(abs(c[0] - b[0]) > 45.0 for b in busy)), cands[0])
+        # D con una L apilada encima: el rótulo va del otro lado de la barra (no lo tapa la L)
+        flip = case is LoadCase.DEAD and any((c.member, c.direction) in stacked for c in chain)
+        ref = heads if flip else outline
+        n_o = len(ref)
+        cands = [ref[min(n_o - 1, round(f * (n_o - 1)))] for f in (0.5, 0.3, 0.7, 0.15, 0.85)]
+        mx, my = next((c for c in cands if all(abs(c[0] - b[0]) > 70.0 for b in busy)), cands[0])
         ox, oy = -gx * sgn * 6.0, -gy * sgn * 6.0
+        if flip:
+            ox, oy = -ox, -oy
         if abs(gy) >= abs(gx):
-            _label(d, mx, my + oy + (0.0 if oy > 0 else -7.0), text, 7.2, C_LOAD)
+            _label(d, mx, my + oy + (0.0 if oy > 0 else -7.0), text, 7.2, c_text)
         else:
-            _label(d, mx + ox, my - 2.5, text, 7.2, C_LOAD, anchor="end" if ox < 0 else "start")
+            _label(d, mx + ox, my - 2.5, text, 7.2, c_text, anchor="end" if ox < 0 else "start")
 
 
 def _draw_nodal_loads(d: Drawing, model: Model, view: _View, L: float = 26.0) -> None:
+    both = {p.node for p in model.nodal_loads if p.case is LoadCase.LIVE} & {
+        p.node for p in model.nodal_loads if p.case is LoadCase.DEAD}
+    live = model.has_live_loads()  # con hipótesis L, cada rótulo indica la suya
     for p in model.nodal_loads:
         x, y = view(*model.nodes[p.node])
+        color = _case_colors(p.case)[0]
+        tag = f" ({p.case.value})" if live else ""
         F = math.hypot(p.Fx, p.Fy)
         if F > 0:
             ux, uy = p.Fx / F, p.Fy / F
-            tail = (x - ux * L, y - uy * L)
-            _arrow(d, tail, (x - ux * 1.2, y - uy * 1.2), C_LOAD, 1.5, 6.5)
-            text = f"{_short(F * _KN)} kN"
+            # D y L en el mismo nudo: se corren a ambos lados de la línea de acción (no se tapan)
+            sh = 0.0 if p.node not in both else (-4.0 if p.case is LoadCase.DEAD else 4.0)
+            ox, oy = -uy * sh, ux * sh
+            tail = (x - ux * L + ox, y - uy * L + oy)
+            _arrow(d, tail, (x - ux * 1.2 + ox, y - uy * 1.2 + oy), color, 1.5, 6.5)
+            text = f"{_short(F * _KN)} kN{tag}"
             if abs(uy) >= abs(ux):
-                _label(d, tail[0], tail[1] + (3.0 if uy < 0 else -9.0), text, 7.2, C_LOAD)
+                _label(d, tail[0] + 2.2 * ox, tail[1] + (3.0 if uy < 0 else -9.0), text, 7.2, color,
+                       anchor="middle" if sh == 0.0 else ("end" if sh < 0 else "start"))
             else:
-                _label(d, tail[0] - math.copysign(3.0, ux), tail[1] - 2.5, text, 7.2, C_LOAD,
+                _label(d, tail[0] - math.copysign(3.0, ux), tail[1] - 2.5 + 2.2 * oy, text, 7.2, color,
                        anchor="end" if ux > 0 else "start")
         if p.Mz:
-            r = 10.0
+            r = 10.0 if p.case is LoadCase.DEAD else 14.0
             a0, a1 = (-0.25 * math.pi, 1.25 * math.pi) if p.Mz > 0 else (1.25 * math.pi, -0.25 * math.pi)
             arc = [(x + r * math.cos(t), y + r * math.sin(t)) for t in np.linspace(a0, a1, 32)]
-            _poly(d, arc[:-2], C_LOAD, 1.3)
-            _arrow(d, arc[-4], arc[-1], C_LOAD, 1.3, 5.0)
-            _label(d, x - 3.0, y - r - 9.0, f"{_short(abs(p.Mz) * _KNM)} kN·m", 7.2, C_LOAD, anchor="end")
+            _poly(d, arc[:-2], color, 1.3)
+            _arrow(d, arc[-4], arc[-1], color, 1.3, 5.0)
+            _label(d, x - 3.0, y - r - 9.0, f"{_short(abs(p.Mz) * _KNM)} kN·m{tag}", 7.2, color, anchor="end")
 
 
 def _draw_node_numbers(d: Drawing, model: Model, view: _View) -> None:
@@ -1498,7 +1730,7 @@ def _diagram_figures(model: Model, results: Results, figs: _Figures) -> list[Flo
 # --------------------------------------------------------------------------- #
 
 
-_GREEK = {"s": "σ", "d": "δ", "n": "ν", "r": "ρ"}
+_GREEK = {"s": "σ", "d": "δ", "n": "ν", "r": "ρ", "f": "φ"}
 
 
 def _g(letter: str) -> str:

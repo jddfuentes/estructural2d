@@ -29,7 +29,7 @@ ruff check .                                           # lint (ruff check . --fi
 ## 3. Arquitectura y regla de dependencias
 
 ```
-app.py            Orquestación Streamlit. NO calcula nada.
+app.py            Orquestación Streamlit. NO calcula nada. Exporta PNG de Plotly (kaleido) para el PDF.
  ├── ui/inputs.py   Sidebar -> Model. ÚNICO lugar con conversión de unidades de UI.
  ├── ui/plots.py    Model/Results -> go.Figure (sin Streamlit; reutilizable en reportes)
  └── core/          Motor puro. Sin Streamlit, sin Plotly, sin pandas, sin I/O.
@@ -58,15 +58,24 @@ Chequeo rápido: `grep -rnE "streamlit|plotly|pandas" core/` debe devolver vací
 Ambas reglas están automatizadas en `tests/test_architecture_and_app.py`.
 `core/__init__.py` **no** reexporta `build_pdf_report`: importar `core` no debe arrastrar ReportLab.
 Excepción a "sin I/O": `core/reports.py` lee **sólo** las fuentes de `core/fonts/`, una vez al
-importarse. Las figuras del PDF se dibujan con `reportlab.graphics` desde `Model`/`Results`
-(no se exportan figuras Plotly: evita depender de Chrome/kaleido y mantiene el core sin Plotly).
+importarse. Las figuras propias del PDF (esquema, deformada, diagramas N-V-M-σ) se dibujan con
+`reportlab.graphics` desde `Model`/`Results`.
+Exportación estática de figuras Plotly: permitida **sólo en la capa UI/App** y desacoplada del core.
+`app.py` llama `fig.to_image(format="png")` (requiere `kaleido`) y pasa los bytes a
+`build_pdf_report(..., image_bytes=...)`; si kaleido/Chrome no está disponible, la app captura la
+excepción y genera el PDF sin esa imagen. `core/` nunca importa Plotly ni kaleido: sólo recibe
+`bytes | None`.
 
 ## 4. Unidades y convenciones de signo
 
 **Core: SI-mm sin excepciones** en datos, cálculos y valores devueltos.
-Única excepción, de presentación: `core/reports.py` convierte a unidades de ingeniería
-**sólo para imprimir** (constantes `_M`, `_KN`, `_KNM`, `_CM*` al inicio del módulo);
-nunca devuelve ni pasa números convertidos al resto del core.
+Excepciones, sólo de presentación (texto, nunca números devueltos al resto del core):
+- `core/reports.py` convierte a unidades de ingeniería **sólo para imprimir** (constantes `_M`, `_KN`,
+  `_KNM`, `_CM*` al inicio del módulo).
+- `core/verification.py` redacta las coordenadas de `issues` en m (`_MM_TO_M_TEXT`, helper `_where`).
+- `Section.linear_mass(rho)` / `mass_per_m` devuelven kg/m (A [mm²]·1e-6·ρ [kg/m³]): es la fórmula de la
+  masa lineal, no una conversión de UI; `mass_per_m` es la de catálogo en acero (ρ = 7850).
+Notación: fluencia **S<sub>y</sub>** (`Sy`) en mensajes, PDF y glosario; `Fx`, `Fy` son fuerzas.
 
 | Magnitud | Core | UI (sólo `ui/`) |
 |---|---|---|
@@ -101,8 +110,35 @@ nunca devuelve ni pasa números convertidos al resto del core.
   sirve para que la UI declare un apoyo puramente elástico. No se dibuja símbolo rígido; libre sin
   resorte ⇒ mecanismo (`StructuralError`).
 - Presentación de resortes (UI y PDF): Kx, Ky en kN/m (= N/mm) y Krz en kN·m/rad; rótulo del vínculo
-  `"<rígido> + elástico"`, o `"elástico"` si el nodo es libre o sólo tiene resorte. El resorte Kx se
-  dibuja hacia afuera de la estructura.
+  `"<rígido> + elástico"`, o `"elástico"` si el nodo es libre o sólo tiene resorte; la tabla de
+  reacciones (app y PDF) lista también los nodos que sólo tienen resorte. Kx se dibuja hacia afuera
+  de la estructura.
+- Resortes inertes: un `k` sobre un GDL que el `Support` del nudo ya restringe **no trabaja** (u = 0):
+  `Spring.inert(type)`
+  lo detecta y `Spring.active(type)` lo anula. La UI avisa y lo descarta; `ui/plots.py` y el PDF dibujan
+  sólo resortes activos (Kx hacia afuera de la estructura; con apoyo rígido, Ky corrido y Krz como arco
+  superior) y la tabla 2.2 informa el inerte como "sin efecto".
+- Dibujo de hipótesis (UI y PDF, misma convención): D naranja, L violeta; en una barra con D y L del
+  mismo sentido la L se apila sobre la D y el rótulo de la D pasa al otro lado de la barra; con cargas L
+  los rótulos indican la hipótesis (`qD`, `qL`, `(D)`, `(L)`). Una entrada de leyenda por hipótesis.
+- Hipótesis de carga: `NodalLoad.case` / `DistributedLoad.case` (y `BeamPointLoad` / `BeamDistLoad` de
+  `builders`) = `LoadCase.DEAD` (`"D"`, **por defecto**: el peso propio y toda carga sin `case` es D) o
+  `LoadCase.LIVE` (`"L"`). `solve()` resuelve **todas** las cargas con γ = 1 (sin L es la resolución de
+  siempre). Las combinaciones (`LoadCombination(name, gamma_D, gamma_L, limit_state)`, `"ELU"`/`"ELS"`)
+  se resuelven por superposición: K se ensambla una vez, se resuelven D y L y se combinan con
+  `combine_results` (exacto: `MemberResult.polynomials` guarda N, V, M, u, v por barra y se re-muestrea con
+  la misma regla de estaciones que `solve`). Estándar (CIRSOC 301-2005 §A.4.2 / AISC 360-16 §B2):
+  `COMB_1_4D`, `COMB_1_2D_1_6L` (ELU) y `COMB_SERVICE_D_L` = 1.0D + 1.0L (ELS).
+- Verificación por combinaciones (`check_combinations`): ELU σ_u ≤ φ·Sy con φ = 0.90 (AISC 360-16 §F1),
+  tensión elástica de primera fluencia; gobierna la combinación de máxima σ_u/(φ·Sy) (= máximo de la
+  envolvente). ELS: flecha bajo 1.0D + 1.0L **sin mayorar** contra L/N.
+- Veredicto global por combinaciones (`CombinationCheck.verdict` → `(Status, rótulo)`, fuente única para
+  UI y PDF): `FLUENCIA` (σ_u > Sy) y `NO VERIFICA` (φ·Sy < σ_u ≤ Sy) en rojo (`Status.FAIL`); `ALERTA` en
+  amarillo sólo si ELU verifica y falla la flecha ELS; `VERIFICA` en verde. La app y la búsqueda de perfil
+  (`suggest_section(..., phi=...)`) usan este mismo criterio; el PDF documenta ELU con la combinación
+  gobernante (cargas mayoradas) y la deformación (§3.3) sólo con 1.0D + 1.0L.
+- `Results.extreme`: máximo de |valor|; magnitudes que difieren < 1e-12 (relativo, `_TIE_RTOL`) empatan y
+  gana la 1ª estación de la 1ª barra (resultado independiente del redondeo de la plataforma).
 
 Nombres físicos cortos (`E`, `I`, `A`, `L`, `M`, `V`, `N`, `q`) están permitidos y son
 preferidos en fórmulas (E741 deshabilitado en ruff).
@@ -121,17 +157,43 @@ core.verification.check_safety(model, results, fs_min=1.5, deflection_limit_rati
                                reference_length=None) -> SafetyCheck
 core.verification.SafetyCheck: .status, .ok, .strength_ok, .issues; ELS: .delta_max, .deflection_ratio,
                                .deflection_limit_ratio, .deflection_ok, .reference_length, .delta_adm
-core.builders.build_beam(...) / build_portal_frame(...) -> Model
+core.builders.build_beam(...) / build_portal_frame(..., beam_q_case=LoadCase.DEAD,
+                                                    lateral_case=LoadCase.DEAD) -> Model
 core.model.Member(i, j, section, material, release_start=False, release_end=False)  # rótulas
 core.model.Spring(node, kx=0.0, ky=0.0, krz=0.0); Model.springs: list[Spring] = []  # resortes
+core.model.Spring.inert(support_type) -> tuple[str, ...]; .active(support_type) -> Spring; .is_null
+core.model.LoadCase.DEAD | LoadCase.LIVE  # "D" | "L"; campo `case=LoadCase.DEAD` al final de NodalLoad,
+                                          # DistributedLoad, BeamPointLoad, BeamDistLoad
+core.model.LoadCombination(name, gamma_D, gamma_L, limit_state="ELU")  # "ELU" | "ELS"
+core.model.COMB_1_4D, COMB_1_2D_1_6L, COMB_SERVICE_D_L, ULS_COMBINATIONS; Model.load_cases(), .has_live_loads()
+core.solver.solve_load_cases(model, n_stations=41) -> dict[LoadCase, Results]  # D siempre; L si hay
+core.solver.combine_results(res_D, res_L, gamma_D, gamma_L) -> Results         # superposición exacta
+core.solver.solve_combinations(model, combinations, n_stations=41) -> list[Results]  # K una sola vez
+core.solver.combine_cases(cases, combinations) -> list[Results]  # combina salidas de solve_load_cases
+core.solver.MemberResult.polynomials: MemberPolynomials | None                 # solución exacta por barra
+core.verification.check_combinations(model, phi=0.9, deflection_limit_ratio=300.0, reference_length=None,
+                                     uls_combinations=ULS_COMBINATIONS,
+                                     service_combination=COMB_SERVICE_D_L, n_stations=41,
+                                     case_results=None) -> CombinationCheck  # case_results: no re-resuelve
+core.verification.CombinationCheck: .governing, .strength, .utilization, .strength_checks, .status, .ok,
+                                    .issues, .verdict -> (Status, "VERIFICA"|"ALERTA"|"NO VERIFICA"|"FLUENCIA");
+                                    ELS: .service_combination, .service_check, .delta_max,
+                                    .deflection_ok; .governing_results, .service_results,
+                                    .uls_results (una por combinación ELU, orden de strength_checks)
 core.design.suggest_section(build, family, fs_min, max_deflection=None,
-                            deflection_limit_ratio=300.0) -> Suggestion | None
+                            deflection_limit_ratio=300.0, phi=None) -> Suggestion | None
+                            # phi dado: verifica con check_combinations (fs_min se ignora); la app usa φ = 0.90
+core.design.Suggestion(section, check, combination=None)  # combination: CombinationCheck si se usó phi
 core.materials.SECTIONS[family][name] -> Section             # claves de familia estables (ver abajo)
+core.materials.Section.linear_mass(rho) -> float [kg/m]       # mass_per_m = linear_mass(7850), acero
 core.materials.FAMILY_NOTES[family] -> str                   # fuente y supuestos de cada familia
 core.materials.family_warnings(family) -> tuple[str, ...]    # advertencias de alcance (UI y PDF)
-core.reports.build_pdf_report(model, results, check, project_title="Memoria de Cálculo", author="",
-                              *, date=None, reference_length=None,
-                              include_figures=True, include_glossary=True) -> bytes  # b"%PDF..."
+core.reports.build_pdf_report(model, results, check: SafetyCheck | CombinationCheck,
+                              project_title="Memoria de Cálculo", author="",
+                              *, date=None, reference_length=None, include_figures=True,
+                              include_glossary=True, image_bytes: bytes | None = None) -> bytes  # b"%PDF..."
+    # check = CombinationCheck: §3.1-3.2 de check.governing_results, §3.3 de check.service_results,
+    # §4 de check.verdict / check.issues (`results` no se usa). image_bytes: PNG exportado por la UI.
 core.glossary.NOTATION / GRAPHIC_SYMBOLS / TERMS             # datos (mini-notación x_{sub}, x^{sup})
 core.glossary.to_markdown(include_graphics=True, heading_level=2) -> str  # para st.markdown (LaTeX $..$)
 ui.plots.plot_structure(model, results=None, deformed_scale=None, ...) -> go.Figure
@@ -162,7 +224,8 @@ Mensajes en castellano y accionables (la UI los muestra tal cual).
 - Datos: `@dataclass(frozen=True, slots=True)`; `Model` es mutable sólo durante su
   construcción en `builders`. **`solve()` nunca muta el modelo** (hay test).
 - Sin estado global mutable, sin cachés ocultas en `core/`. Si hace falta cachear, se hace
-  en la UI (`st.cache_data`).
+  en la UI (`st.cache_data`): `app.py` cachea análisis, PNG, PDF y sugerencia con clave `repr(model)`
+  (+ parámetros), y resuelve D/L una sola vez por cambio de modelo (`check_combinations(case_results=…)`).
 - Docstrings y mensajes al usuario en **castellano**; identificadores en inglés.
 - Cada constante normativa/tabla lleva comentario con su fuente (norma, catálogo).
 - Línea máx. 110 caracteres. Sin dependencias nuevas sin justificar en el PR/commit.
@@ -227,16 +290,23 @@ en `local_stiffness`; (3) columna "rótula" en el editor de apoyos; (4) checks.
 ## 9. Alcance del MVP y backlog (fuera de alcance hoy)
 
 Incluido: vigas continuas y voladizos, pórtico simple de una nave, apoyos empotrado /
-articulado / móvil / libre, apoyos elásticos (resortes kx, ky, krz), rótulas internas, cargas puntuales, momentos, distribuidas trapezoidales y parciales,
+articulado / móvil, cargas puntuales, momentos, distribuidas trapezoidales y parciales,
 peso propio, catálogo de perfiles, N-V-M-σ-deformada, FS con alerta < FS mín.,
 búsqueda del perfil más liviano.
 
 Backlog priorizado (no implementar sin tarea explícita):
-1. ~~Rótulas internas y apoyos elásticos (resortes)~~ → hecho: core (`Member.release_start/release_end`,
-   `Spring`, `Model.springs`, `SupportType.FREE`), UI (editores de rótulas y resortes), gráficos y PDF
-   (símbolos en `core/glossary.py`), tabla de reacciones con nodos elásticos. Tests: `test_hinges.py`,
-   `test_springs.py`, `test_reports.py`, `test_plots.py`, `test_architecture_and_app.py`.
-2. Combinaciones de carga (CIRSOC 301 / AISC 360 LRFD-ASD).
+1. ~~Rótulas internas y apoyos elásticos~~ → **completado**: core (`Member.release_start/release_end`,
+   `Spring`, `Model.springs`), UI (editor de rótulas con una fila fija por barra, resortes Kx/Ky/Krz y apoyo
+   `libre`), símbolos en `ui/plots.py` y PDF (glosario en `core/glossary.py`), tabla de reacciones con
+   nodos elásticos. Tests: `test_hinges.py`, `test_springs.py`, `test_reports.py`, `test_plots.py`,
+   `test_architecture_and_app.py`.
+2. ~~Combinaciones de carga D / L (CIRSOC 301 / AISC 360 LRFD)~~ → **completado**: core (`LoadCase`,
+   `LoadCombination`, `solve_load_cases`, `combine_results`, `solve_combinations`, `check_combinations`,
+   `CombinationCheck.verdict`), UI (hipótesis D/L por carga, veredicto global, diagramas por combinación,
+   búsqueda de perfil por combinaciones) y PDF (LRFD + ELS de servicio). Tests: `test_load_combinations.py`,
+   `test_reports.py`, `test_deflection.py`. q y H del pórtico eligen hipótesis D o L
+   (`beam_q_case`, `lateral_case`). Fuera de alcance (tarea aparte): ASD y cargas Lr / S / R / W / E
+   (H lateral no se trata como viento: entra como D o L).
 3. Pandeo flexional de columnas y pandeo lateral-torsional de vigas.
 4. Tensión de corte (τ = VQ/It) y von Mises combinada.
 5. Flexión en eje débil y secciones asimétricas (ya soportadas en `Section` vía `c_top/c_bot`).
