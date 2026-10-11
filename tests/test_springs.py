@@ -349,3 +349,44 @@ def test_rotational_spring_restores_stiffness_at_fully_hinged_node():
     assert r.displacements[1, 2] == pytest.approx(M0 / krz, rel=1e-12)
     assert r.reactions[1][2] == pytest.approx(-M0, rel=1e-12)
     assert max(float(np.max(np.abs(mr.M))) for mr in r.members) <= 1e-6 * M0
+
+
+# --------------------------------------------------------------------------- #
+# Resortes sobre GDL ya restringidos por un apoyo rígido (no trabajan)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("support", "inert", "active"),
+    [
+        (ST.PINNED, ("kx", "ky"), (0.0, 0.0, 3e9)),  # ux, uy restringidos; rz libre
+        (ST.ROLLER, ("ky",), (5e3, 0.0, 3e9)),  # sólo uy restringido
+        (ST.FIXED, ("kx", "ky", "krz"), (0.0, 0.0, 0.0)),
+        (ST.FREE, (), (5e3, 7e3, 3e9)),
+        (None, (), (5e3, 7e3, 3e9)),
+    ],
+)
+def test_spring_inert_and_active_components(support, inert, active):
+    """k sobre un GDL restringido rígidamente: u = 0 ⇒ R_k = −k·0 = 0, no aporta nada."""
+    sp = Spring(1, kx=5e3, ky=7e3, krz=3e9)
+    assert sp.inert(support) == inert
+    act = sp.active(support)
+    assert act.stiffness == active and act.node == 1
+    assert act.is_null is (active == (0.0, 0.0, 0.0))
+
+
+def test_inert_spring_gives_same_results_as_active_only():
+    """Viga simple articulado-móvil con resorte (kx, ky, krz) en el nudo articulado: kx y ky no
+    trabajan; el resultado es idéntico al de dejar sólo krz (empotramiento elástico)."""
+    L = 6000.0
+
+    def model(spring: Spring) -> Model:
+        return Model(nodes=[(0.0, 0.0), (L, 0.0)], members=[Member(0, 1, SEC, MAT)],
+                     supports=[Support(0, ST.PINNED), Support(1, ST.ROLLER)],
+                     distributed_loads=[DistributedLoad(0, q, q)], springs=[spring])
+
+    full = Spring(0, kx=1e4, ky=1e4, krz=5e10)
+    a, b = solve(model(full)), solve(model(full.active(ST.PINNED)))
+    np.testing.assert_allclose(a.displacements, b.displacements, rtol=1e-12, atol=1e-15)
+    for n in a.reactions:
+        np.testing.assert_allclose(a.reactions[n], b.reactions[n], rtol=1e-12, atol=1e-9)

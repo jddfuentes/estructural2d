@@ -8,10 +8,10 @@ Criterios MVP:
   (por defecto, el ancho horizontal del modelo = luz de la viga o del pórtico).
 
 Combinaciones de carga (`check_combinations`, hipótesis D y L):
-- ELU (resistencia), envolvente de 1.4D y 1.2D + 1.6L (LRFD): σ_u ≤ φ·Fy con φ = 0.90, sobre la
+- ELU (resistencia), envolvente de 1.4D y 1.2D + 1.6L (LRFD): σ_u ≤ φ·Sy con φ = 0.90, sobre la
   tensión normal elástica de las solicitaciones mayoradas (criterio de primera fluencia,
   conservador frente al momento plástico). Gobierna la combinación de máxima utilización
-  σ_u / (φ·Fy), que es el máximo de la envolvente.
+  σ_u / (φ·Sy), que es el máximo de la envolvente.
 - ELS (servicio): flecha bajo 1.0D + 1.0L (cargas sin mayorar) frente a L/N.
 
 No incluye pandeo global, pandeo lateral-torsional, abolladura local,
@@ -27,10 +27,19 @@ from enum import Enum
 
 import numpy as np
 
-from core.model import COMB_SERVICE_D_L, SLS, ULS, ULS_COMBINATIONS, LoadCombination, Model
-from core.solver import MemberResult, Results, solve_combinations
+from core.model import COMB_SERVICE_D_L, SLS, ULS, ULS_COMBINATIONS, LoadCase, LoadCombination, Model
+from core.solver import MemberResult, Results, combine_cases, solve_combinations
 
 FS_MIN_DEFAULT = 1.5
+
+# mm -> m SÓLO para redactar las coordenadas de `issues` (texto listo para mostrar). Excepción de
+# presentación documentada en AGENTS.md §4: ningún número convertido sale de este módulo.
+_MM_TO_M_TEXT = 1e-3
+
+
+def _where(member: int, point: tuple[float, float]) -> str:
+    """Ubicación para los mensajes de `issues`: 'barra k, (x; y) m'."""
+    return f"barra {member}, ({point[0] * _MM_TO_M_TEXT:.2f}; {point[1] * _MM_TO_M_TEXT:.2f}) m"
 
 # Flecha admisible por defecto L/300: valor usual de predimensionamiento para vigas.
 # Los límites de servicio dependen del uso y de la norma (AISC 360 cap. L y CIRSOC 301
@@ -86,7 +95,7 @@ class SafetyCheck:
     def issues(self) -> tuple[str, ...]:
         """Motivos por los que no es un OK limpio, en castellano (la UI los muestra tal cual)."""
         out: list[str] = []
-        where = f"barra {self.member}, ({self.point[0] / 1e3:.2f}; {self.point[1] / 1e3:.2f}) m"
+        where = _where(self.member, self.point)
         if self.fs < 1.0:
             out.append(f"Fluencia: σ máx = {self.sigma_max:.1f} MPa supera Sy = {self.sy:g} MPa "
                        f"en {where}.")
@@ -174,8 +183,8 @@ def check_safety(
 class CombinationCheck:
     """Verificación por combinaciones de carga: ELU por envolvente + ELS de servicio.
 
-    Cada `SafetyCheck` de ELU usa FS_min = 1/φ, de modo que FS ≥ FS_min ⇔ σ_u ≤ φ·Fy y
-    `utilization` = σ_u / (φ·Fy). El de ELS sólo se usa por su flecha.
+    Cada `SafetyCheck` de ELU usa FS_min = 1/φ, de modo que FS ≥ FS_min ⇔ σ_u ≤ φ·Sy y
+    `utilization` = σ_u / (φ·Sy). El de ELS sólo se usa por su flecha.
     """
 
     phi: float  # factor de resistencia φ
@@ -185,6 +194,8 @@ class CombinationCheck:
     service_check: SafetyCheck  # flecha bajo `service_combination`
     governing_results: Results  # solicitaciones mayoradas de la combinación gobernante
     service_results: Results  # resultados bajo la combinación de servicio
+    # ---- agregado al final (AGENTS.md §5) ---- #
+    uls_results: tuple[Results, ...] = ()  # resultados de cada combinación ELU (orden de strength_checks)
 
     @property
     def strength(self) -> SafetyCheck:
@@ -193,7 +204,7 @@ class CombinationCheck:
 
     @property
     def utilization(self) -> float:
-        """σ_u / (φ·Fy) de la combinación gobernante; > 1 no verifica."""
+        """σ_u / (φ·Sy) de la combinación gobernante; > 1 no verifica."""
         return self.strength.utilization
 
     @property
@@ -211,7 +222,7 @@ class CombinationCheck:
 
     @property
     def status(self) -> Status:
-        """FLUENCIA si σ_u > Fy; ALERTA si σ_u > φ·Fy o la flecha de servicio excede L/N; si no, OK."""
+        """FLUENCIA si σ_u > Sy; ALERTA si σ_u > φ·Sy o la flecha de servicio excede L/N; si no, OK."""
         if self.strength.fs < 1.0:
             return Status.FAIL
         if not self.strength_ok or not self.deflection_ok:
@@ -223,16 +234,34 @@ class CombinationCheck:
         return self.status is Status.OK
 
     @property
+    def verdict(self) -> tuple[Status, str]:
+        """Veredicto global para mostrar (UI y PDF): (severidad, rótulo).
+
+        - (FAIL, "FLUENCIA"): σ_u > Sy en la combinación gobernante.
+        - (FAIL, "NO VERIFICA"): φ·Sy < σ_u ≤ Sy (en LRFD no verificar ELU es una falla, no una alerta).
+        - (ALERT, "ALERTA"): ELU verifica pero la flecha de servicio supera L/N.
+        - (OK, "VERIFICA"): verifican ELU y ELS.
+        La severidad sólo elige el color; el detalle se lee de `issues`.
+        """
+        if self.status is Status.FAIL:
+            return Status.FAIL, "FLUENCIA"
+        if not self.strength_ok:
+            return Status.FAIL, "NO VERIFICA"
+        if not self.deflection_ok:
+            return Status.ALERT, "ALERTA"
+        return Status.OK, "VERIFICA"
+
+    @property
     def issues(self) -> tuple[str, ...]:
         """Motivos de un veredicto no-OK, en castellano e indicando la combinación."""
         out: list[str] = []
         st, name = self.strength, self.governing.name
-        where = f"barra {st.member}, ({st.point[0] / 1e3:.2f}; {st.point[1] / 1e3:.2f}) m"
+        where = _where(st.member, st.point)
         if st.fs < 1.0:
-            out.append(f"ELU {name}: σu = {st.sigma_max:.1f} MPa supera Fy = {st.sy:g} MPa "
+            out.append(f"ELU {name}: σu = {st.sigma_max:.1f} MPa supera Sy = {st.sy:g} MPa "
                        f"(fluencia) en {where}.")
         elif not st.strength_ok:
-            out.append(f"ELU {name}: σu = {st.sigma_max:.1f} MPa > φ·Fy = {self.phi:g}·{st.sy:g} = "
+            out.append(f"ELU {name}: σu = {st.sigma_max:.1f} MPa > φ·Sy = {self.phi:g}·{st.sy:g} = "
                        f"{self.phi * st.sy:.1f} MPa (utilización {st.utilization:.0%}) en {where}.")
         sv = self.service_check
         if not sv.deflection_ok:
@@ -250,11 +279,15 @@ def check_combinations(
     uls_combinations: Sequence[LoadCombination] = ULS_COMBINATIONS,
     service_combination: LoadCombination = COMB_SERVICE_D_L,
     n_stations: int = 41,
+    case_results: dict[LoadCase, Results] | None = None,
 ) -> CombinationCheck:
     """Resuelve D y L una vez y verifica ELU (envolvente) y ELS por combinaciones.
 
+    `case_results`: respuestas por hipótesis ya resueltas (`solve_load_cases(model)`); si se dan,
+    no se vuelve a ensamblar ni resolver K (la UI resuelve una sola vez por cambio de modelo).
+
     Args:
-        phi: factor de resistencia φ (0 < φ ≤ 1); ELU verifica si σ_u ≤ φ·Fy.
+        phi: factor de resistencia φ (0 < φ ≤ 1); ELU verifica si σ_u ≤ φ·Sy.
         deflection_limit_ratio, reference_length: como en `check_safety` (flecha L/N de servicio).
         uls_combinations: combinaciones de resistencia (por defecto 1.4D y 1.2D + 1.6L).
         service_combination: combinación de servicio (por defecto 1.0D + 1.0L).
@@ -274,7 +307,8 @@ def check_combinations(
         raise ValueError(f"La combinación {service_combination.name!r} no es de servicio ({SLS}).")
 
     combos = [*uls_combinations, service_combination]
-    results = solve_combinations(model, combos, n_stations)
+    results = (solve_combinations(model, combos, n_stations) if case_results is None
+               else combine_cases(case_results, combos))
     strength_checks = tuple(
         (comb, check_safety(model, res, fs_min=1.0 / phi, deflection_limit_ratio=0.0,
                             reference_length=reference_length))
@@ -288,6 +322,7 @@ def check_combinations(
         phi=phi, strength_checks=strength_checks, governing=strength_checks[k_gov][0],
         service_combination=service_combination, service_check=service_check,
         governing_results=results[k_gov], service_results=results[-1],
+        uls_results=tuple(results[:-1]),
     )
 
 

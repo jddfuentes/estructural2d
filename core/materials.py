@@ -95,8 +95,12 @@ class Section:
 
     @property
     def mass_per_m(self) -> float:
-        """Masa lineal para acero (ρ = 7850 kg/m³) [kg/m]."""
-        return self.A * 1e-6 * 7850.0
+        """Masa lineal de catálogo, ACERO (ρ = 7850 kg/m³) [kg/m]. Para otro material: `linear_mass`."""
+        return self.linear_mass(7850.0)
+
+    def linear_mass(self, rho: float) -> float:
+        """Masa lineal [kg/m] = A [mm²] · 1e-6 [m²/mm²] · ρ [kg/m³] (cambio de unidad de la fórmula)."""
+        return self.A * 1e-6 * rho
 
 
 # ---- Constructores ---------------------------------------------------------- #

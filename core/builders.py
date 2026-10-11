@@ -138,11 +138,15 @@ def build_portal_frame(
     lateral_load: float = 0.0,
     beam_point_loads: list[BeamPointLoad] | None = None,
     self_weight: bool = False,
+    beam_q_case: LoadCase = LoadCase.DEAD,
+    lateral_case: LoadCase = LoadCase.DEAD,
 ) -> Model:
     """Pórtico simple de una nave: 2 columnas + viga, nudos rígidos.
 
-    beam_q: carga distribuida uniforme vertical sobre la viga [N/mm] (< 0 abajo).
-    lateral_load: carga horizontal en el nudo superior izquierdo [N] (> 0 hacia +X).
+    beam_q: carga distribuida uniforme vertical sobre la viga [N/mm] (< 0 abajo), hipótesis
+        `beam_q_case` (D por defecto).
+    lateral_load: carga horizontal en el nudo superior izquierdo [N] (> 0 hacia +X), hipótesis
+        `lateral_case` (D por defecto). Viento (W) y sismo (E) no están modelados.
     beam_point_loads: cargas puntuales sobre la viga, x medido desde la columna izquierda.
     Nodos: 0 = base izq., 1 = nudo sup. izq., ..., n-2 = nudo sup. der., n-1 = base der.
     """
@@ -165,13 +169,14 @@ def build_portal_frame(
     model = Model(nodes=nodes, members=members)
     model.supports = [Support(base_l, base_left), Support(base_r, base_right)]
     if lateral_load:
-        model.nodal_loads.append(NodalLoad(top_l, Fx=lateral_load))
+        model.nodal_loads.append(NodalLoad(top_l, Fx=lateral_load, case=lateral_case))
     for p in beam_point_loads:
         n = 1 + min(range(len(bx)), key=lambda k: abs(bx[k] - p.x))
         model.nodal_loads.append(NodalLoad(n, Fx=p.Fx, Fy=p.Fy, Mz=p.Mz, case=p.case))
     if beam_q:
         model.distributed_loads += [
-            DistributedLoad(m, beam_q, beam_q, LoadDirection.GLOBAL_Y) for m in beam_members
+            DistributedLoad(m, beam_q, beam_q, LoadDirection.GLOBAL_Y, case=beam_q_case)
+            for m in beam_members
         ]
     if self_weight:
         _add_self_weight(model)

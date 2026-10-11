@@ -23,10 +23,9 @@ from core.solver import MemberResult, Results
 C_MEMBER = "#2B3440"
 C_SUPPORT = "#5B6573"
 C_SPRING = "#B45309"
-C_LOAD = "#C2410C"
-C_LOAD_Q = "#EA580C"
-C_LOAD_D = "#C2410C"
-C_LOAD_L = "#7C3AED"
+C_LOAD_D = "#C2410C"  # hipótesis D (misma convención que core/reports.py)
+C_LOAD_L = "#7C3AED"  # hipótesis L
+CASE_STYLE = {LoadCase.DEAD: (C_LOAD_D, "D (permanente)"), LoadCase.LIVE: (C_LOAD_L, "L (sobrecarga)")}
 C_DEFORMED = "#2563EB"
 C_GRID = "rgba(120,130,145,0.18)"
 C_REFERENCE = "#475569"
@@ -128,8 +127,9 @@ def plot_structure(
         _draw_spring(fig, model, spring, s, support_types.get(spring.node))
 
     if show_loads:
-        _draw_distributed_loads(fig, model, ext)
-        _draw_point_loads(fig, model, ext)
+        legend: set[LoadCase] = set()  # una sola entrada de leyenda por hipótesis
+        _draw_distributed_loads(fig, model, ext, legend)
+        _draw_point_loads(fig, model, ext, legend)
         if any(d.label == SELF_WEIGHT for d in model.distributed_loads):
             fig.add_annotation(xref="paper", yref="paper", x=0.0, y=0.0, xanchor="left", yanchor="bottom",
                                text="+ peso propio (no dibujado)", showarrow=False,
@@ -241,15 +241,22 @@ def _draw_spring(
     support_type: SupportType | None = None,
 ) -> None:
     x0, y0 = model.nodes[spring.node]
+    inert = spring.inert(support_type)
+    spring = spring.active(support_type)  # sólo se dibujan los resortes que trabajan
     style = dict(mode="lines", line=dict(color=C_SPRING, width=2.5), showlegend=False)
     labels: list[str] = []
     mixed_support = support_type is not None and support_type is not SupportType.FREE
     offset = 1.5 * s if mixed_support else 0.0
     if spring.kx > 0.0:
-        x, y = _spring_points(x0, x0 - 2.4 * s, 0.45 * s, False)
-        x = [v + 0.0 for v in x]
+        # a la altura del nudo, del lado opuesto a la barra (no pisa la viga ni la columna)
+        dx, _ = _member_dir_at(model, spring.node)
+        side = -math.copysign(1.0, dx) if abs(dx) > 0.1 else -1.0
+        x_end = x0 + side * 2.4 * s
+        x, y = _spring_points(x0, x_end, 0.45 * s, False)
         y = [v + y0 for v in y]
         fig.add_trace(go.Scatter(x=np.asarray(x) * M_TO, y=np.asarray(y) * M_TO, **style))
+        fig.add_trace(go.Scatter(x=np.full(2, x_end * M_TO), y=np.asarray([y0 - s, y0 + s]) * M_TO,
+                                 **{**style, "line": dict(color=C_SUPPORT, width=1.5)}))
         labels.append(f"Kx = {spring.kx:g} kN/m")
     if spring.ky > 0.0:
         x, y = _spring_points(y0, y0 - 2.4 * s, 0.45 * s, True)
@@ -270,7 +277,9 @@ def _draw_spring(
             ))
         labels.append(f"Ky = {spring.ky:g} kN/m")
     if spring.krz > 0.0:
-        angles = np.linspace(-0.3 * math.pi, 1.5 * math.pi, 30)
+        # con apoyo rígido: arco superior, fuera del triángulo
+        angles = (np.linspace(-0.15 * math.pi, 1.15 * math.pi, 30) if mixed_support
+                  else np.linspace(-0.3 * math.pi, 1.5 * math.pi, 30))
         radius = 0.85 * s
         fig.add_trace(go.Scatter(
             x=(x0 + radius * np.cos(angles)) * M_TO,
@@ -278,6 +287,7 @@ def _draw_spring(
             **style,
         ))
         labels.append(f"Krz = {spring.krz * KNM:g} kN·m/rad")
+    labels += [f"{n.capitalize()} sin efecto (GDL restringido)" for n in inert]
     if labels:
         fig.add_trace(go.Scatter(
             x=[x0 * M_TO], y=[y0 * M_TO], mode="markers", marker=dict(size=16, opacity=0),
@@ -338,32 +348,41 @@ def _arrow(fig: go.Figure, head: tuple[float, float], tail: tuple[float, float],
     )
 
 
-def _draw_point_loads(fig: go.Figure, model: Model, ext: float) -> None:
+def _legend_case(fig: go.Figure, case: LoadCase, shown: set[LoadCase]) -> None:
+    """Entrada de leyenda de la hipótesis, una sola vez por figura."""
+    if case in shown:
+        return
+    color, name = CASE_STYLE[case]
+    fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=color, width=3), name=name))
+    shown.add(case)
+
+
+def _draw_point_loads(fig: go.Figure, model: Model, ext: float, legend: set[LoadCase]) -> None:
     L = 0.14 * ext
-    shown_cases: set[LoadCase] = set()
+    live = model.has_live_loads()
+    both = {p.node for p in model.nodal_loads if p.case is LoadCase.LIVE} & {
+        p.node for p in model.nodal_loads if p.case is LoadCase.DEAD}
     for p in model.nodal_loads:
-        color = C_LOAD_D if p.case is LoadCase.DEAD else C_LOAD_L
-        if p.case not in shown_cases:
-            case_name = "Muerta" if p.case is LoadCase.DEAD else "Viva"
-            fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
-                                     line=dict(color=color, width=3),
-                                     name=f"{p.case.value} ({case_name})"))
-            shown_cases.add(p.case)
+        color = CASE_STYLE[p.case][0]
+        _legend_case(fig, p.case, legend)
+        tag = f" ({p.case.value})" if live else ""
         x0, y0 = model.nodes[p.node]
         F = math.hypot(p.Fx, p.Fy)
         if F > 0:
             ux, uy = p.Fx / F, p.Fy / F
-            label = f"{F * KN:.3g} kN"
-            _arrow(fig, (x0, y0), (x0 - ux * L, y0 - uy * L), color, label, 2.5)
+            # D y L en el mismo nudo: corridas a ambos lados de la línea de acción
+            sh = 0.0 if p.node not in both else (-0.012 if p.case is LoadCase.DEAD else 0.012) * ext
+            hx, hy = x0 - uy * sh, y0 + ux * sh
+            _arrow(fig, (hx, hy), (hx - ux * L, hy - uy * L), color, f"{F * KN:.3g} kN{tag}", 2.5)
         if p.Mz:
-            r = 0.06 * ext
+            r = (0.06 if p.case is LoadCase.DEAD else 0.08) * ext
             sign = 1.0 if p.Mz > 0 else -1.0
             th = np.linspace(-0.75 * math.pi, 0.75 * math.pi, 40) * sign + math.pi / 2
             ax_, ay_ = x0 + r * np.cos(th), y0 + r * np.sin(th)
             fig.add_trace(go.Scatter(x=ax_ * M_TO, y=ay_ * M_TO, mode="lines",
                                      line=dict(color=color, width=2.5), hoverinfo="skip", showlegend=False))
             _arrow(fig, (ax_[-1], ay_[-1]), (ax_[-3], ay_[-3]), color)
-            fig.add_annotation(x=x0 * M_TO, y=(y0 + 1.3 * r) * M_TO, text=f"{abs(p.Mz) * KNM:.3g} kN·m",
+            fig.add_annotation(x=x0 * M_TO, y=(y0 + 1.3 * r) * M_TO, text=f"{abs(p.Mz) * KNM:.3g} kN·m{tag}",
                                showarrow=False, font=dict(color=color, size=12),
                                bgcolor="rgba(255,255,255,0.75)")
 
@@ -380,7 +399,7 @@ def _load_vector(model: Model, dl: DistributedLoad) -> tuple[float, float]:
             return -s, c
 
 
-def _draw_distributed_loads(fig: go.Figure, model: Model, ext: float) -> None:
+def _draw_distributed_loads(fig: go.Figure, model: Model, ext: float, legend: set[LoadCase]) -> None:
     # Sumar cargas por (barra, dirección) sin el peso propio (se indica aparte, no se dibuja)
     acc: dict[tuple[int, LoadDirection, LoadCase], list[float]] = {}
     for d in model.distributed_loads:
@@ -393,13 +412,20 @@ def _draw_distributed_loads(fig: go.Figure, model: Model, ext: float) -> None:
              for (m, dr, case), (q1, q2) in acc.items() if q1 or q2]
     if not loads:
         return
-    for case, color, name in ((LoadCase.DEAD, C_LOAD_D, "D (Muerta)"),
-                              (LoadCase.LIVE, C_LOAD_L, "L (Viva)")):
+    for case in LoadCase:
         if any(d.case is case for d in loads):
-            fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
-                                     line=dict(color=color, width=3), name=name))
+            _legend_case(fig, case, legend)
     qmax = max(max(abs(d.q_start), abs(d.q_end)) for d in loads)
     H = 0.10 * ext  # altura de dibujo para qmax
+    live = model.has_live_loads()
+    # Resultante D por (barra, dirección): la L del mismo sentido se apila encima (no se superponen)
+    dead: dict[tuple[int, LoadDirection], tuple[float, float]] = {}
+    for d in loads:
+        if d.case is LoadCase.DEAD:
+            dead[(d.member, d.direction)] = (max(abs(d.q_start), abs(d.q_end)), d.q_start + d.q_end)
+    stacked = {(d.member, d.direction) for d in loads if d.case is LoadCase.LIVE
+               and (d.member, d.direction) in dead
+               and dead[(d.member, d.direction)][1] * (d.q_start + d.q_end) > 0}
 
     # Agrupar tramos contiguos con igual dirección y continuidad de q para rotular una sola vez
     groups: list[list[DistributedLoad]] = []
@@ -417,22 +443,31 @@ def _draw_distributed_loads(fig: go.Figure, model: Model, ext: float) -> None:
         groups.append([d])
 
     for group in groups:
-        color = C_LOAD_D if group[0].case is LoadCase.DEAD else C_LOAD_L
+        case = group[0].case
+        color = CASE_STYLE[case][0]
         outline_x: list[float] = []
         outline_y: list[float] = []
+        line_x: list[float] = []  # puntos sobre la barra (rótulo de la D si tiene una L apilada)
+        line_y: list[float] = []
         for d in group:
             mem = model.members[d.member]
             (x1, y1), (x2, y2) = model.nodes[mem.i], model.nodes[mem.j]
             gx, gy = _load_vector(model, d)
             Lm = model.member_length(d.member)
             n = max(2, int(round(Lm / ext * 14)) + 1)
+            base = 0.0
+            if case is LoadCase.LIVE and (d.member, d.direction) in stacked:
+                base = math.copysign(H * dead[(d.member, d.direction)][0] / qmax + 0.015 * ext,
+                                     d.q_start + d.q_end)
             for t in np.linspace(0, 1, n):
                 qv = d.q_start + (d.q_end - d.q_start) * t
-                bx, by = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
+                bx, by = x1 + (x2 - x1) * t - gx * base, y1 + (y2 - y1) * t - gy * base
                 h = H * qv / qmax  # con signo
                 tail = (bx - gx * h, by - gy * h)
                 outline_x.append(tail[0])
                 outline_y.append(tail[1])
+                line_x.append(bx)
+                line_y.append(by)
                 if abs(qv) > 0.02 * qmax:
                     _arrow(fig, (bx, by), tail, color, width=1.3)
         fig.add_trace(go.Scatter(
@@ -443,10 +478,14 @@ def _draw_distributed_loads(fig: go.Figure, model: Model, ext: float) -> None:
         uniform = all(math.isclose(d.q_start, d.q_end) for d in group) and math.isclose(q1, q2)
         if max(abs(q1), abs(q2)) < 0.05 * qmax:
             continue  # p.ej. peso propio frente a cargas mayores: sin rótulo
-        label = f"q = {abs(q1):.3g} kN/m" if uniform else f"q = {abs(q1):.3g} → {abs(q2):.3g} kN/m"
+        sym = f"q<sub>{case.value}</sub>" if live else "q"
+        label = f"{sym} = {abs(q1):.3g} kN/m" if uniform else f"{sym} = {abs(q1):.3g} → {abs(q2):.3g} kN/m"
         k = len(outline_x) // 2
-        fig.add_annotation(x=outline_x[k] * M_TO, y=outline_y[k] * M_TO, text=label, showarrow=False,
-                           yshift=12, font=dict(color=color, size=12), bgcolor="rgba(255,255,255,0.75)")
+        flip = case is LoadCase.DEAD and any((d.member, d.direction) in stacked for d in group)
+        ax, ay = (line_x[k], line_y[k]) if flip else (outline_x[k], outline_y[k])
+        fig.add_annotation(x=ax * M_TO, y=ay * M_TO, text=label, showarrow=False,
+                           yshift=-14 if flip else 12, font=dict(color=color, size=12),
+                           bgcolor="rgba(255,255,255,0.75)")
 
 
 def auto_deformed_scale(model: Model, results: Results) -> float:

@@ -106,6 +106,28 @@ class Spring:
         """(kx [N/mm], ky [N/mm], krz [N·mm/rad]) en el orden de los GDL (ux, uy, rz)."""
         return (self.kx, self.ky, self.krz)
 
+    def inert(self, support: SupportType | None) -> tuple[str, ...]:
+        """Rigideces > 0 ("kx", "ky", "krz") sobre GDL que `support` ya restringe: no trabajan (u = 0)."""
+        if support is None:
+            return ()
+        names = ("kx", "ky", "krz")
+        return tuple(n for n, k, r in zip(names, self.stiffness, support.restrained_dofs, strict=True)
+                     if k > 0.0 and r)
+
+    def active(self, support: SupportType | None) -> Spring:
+        """Copia con k = 0 en los GDL restringidos por `support` (mismo resultado de cálculo).
+
+        Sirve para mostrar/documentar sólo los resortes que trabajan (UI, PDF).
+        """
+        r = support.restrained_dofs if support is not None else (False, False, False)
+        kx, ky, krz = (0.0 if rr else k for k, rr in zip(self.stiffness, r, strict=True))
+        return Spring(self.node, kx, ky, krz)
+
+    @property
+    def is_null(self) -> bool:
+        """True si las tres rigideces son nulas."""
+        return self.kx == 0.0 and self.ky == 0.0 and self.krz == 0.0
+
 
 @dataclass(frozen=True, slots=True)
 class NodalLoad:

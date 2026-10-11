@@ -97,11 +97,14 @@ NOTATION: tuple[Group, ...] = (
     Group(
         "Hipótesis y combinaciones",
         (
-            Entry("D", "Hipótesis de carga permanente: peso propio, terminaciones y equipos fijos."),
-            Entry("L", "Hipótesis de sobrecarga de uso, ocupación, mantenimiento o cargas móviles."),
+            Entry("D; L (hipótesis)", "D: cargas permanentes (peso propio, terminaciones, equipos fijos). "
+                  "L: sobrecarga de uso. Como hipótesis aparecen sólo rotuladas (D)/(L), con subíndice "
+                  "(q_{D}, q_{L}) o en combinaciones (1.2D + 1.6L); L sola es la longitud."),
             Entry("ELU", "Estado límite último: resistencia con cargas mayoradas."),
             Entry("ELS", "Estado límite de servicio: aptitud de uso y control de flechas."),
-            Entry("φ", "Factor de resistencia; en este informe φ = 0.90 para la verificación ELU."),
+            Entry("γ_{D}, γ_{L}", "Factores de carga por hipótesis en una combinación: γ_{D}·D + γ_{L}·L."),
+            Entry("σ_{u}", "Tensión normal con cargas mayoradas (ELU): N_{u}/A ± M_{u}·c/I.", "MPa"),
+            Entry("φ", "Factor de resistencia (0.90 por defecto); ELU verifica si σ_{u} ≤ φ·S_{y}."),
             Entry("1.4D; 1.2D + 1.6L", "Combinaciones normativas de resistencia."),
             Entry("1.0D + 1.0L", "Combinación normativa de servicio sin mayoración."),
         ),
@@ -178,7 +181,8 @@ GRAPHIC_SYMBOLS: tuple[GraphicSymbol, ...] = (
     GraphicSymbol("roller", "Móvil", "Apoyo que restringe sólo u_{y}; permite desplazamiento en X y giro."),
     GraphicSymbol(
         "spring", "Resorte elástico",
-        "Apoyo nodal con rigidez K_{x}, K_{y} o K_{rz}; la reacción es opuesta al desplazamiento.",
+        "Apoyo nodal con rigidez K_{x}, K_{y} o K_{rz}; la reacción es opuesta al desplazamiento. Sólo se "
+        "dibuja en GDL libres: sobre un GDL ya restringido por el apoyo rígido no trabaja.",
     ),
     GraphicSymbol(
         "point", "Carga concentrada", "Fuerza aplicada en un nodo; la flecha indica su sentido real."
@@ -187,6 +191,11 @@ GRAPHIC_SYMBOLS: tuple[GraphicSymbol, ...] = (
         "dist",
         "Carga distribuida",
         "Carga por unidad de longitud; la altura es proporcional a q (variación lineal entre extremos).",
+    ),
+    GraphicSymbol(
+        "dist_live", "Hipótesis D y L",
+        "Cargas permanentes D en naranja y sobrecargas L en violeta; en una misma barra, la L se dibuja "
+        "apilada sobre la D. Los rótulos indican la hipótesis (q_{D}, q_{L}, (D), (L)).",
     ),
     GraphicSymbol(
         "moment", "Momento aplicado", "Momento concentrado en un nodo; la flecha indica el sentido de giro."
@@ -263,7 +272,8 @@ TERMS: tuple[Term, ...] = (
     ),
     Term(
         "Estado límite último",
-        "ELU: evaluación de resistencia frente a tensión última σu ≤ φ·Sy.",
+        "ELU: verificación de resistencia con cargas mayoradas, σ_{u} ≤ φ·S_{y}. Por combinaciones, "
+        "superarlo es NO VERIFICA (o FLUENCIA si σ_{u} > S_{y}); una flecha de servicio excedida es ALERTA.",
     ),
     Term(
         "Fluencia",

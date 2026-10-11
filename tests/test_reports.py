@@ -253,3 +253,127 @@ def test_glossary_section():
         assert key in text, key
     without = _text(build_pdf_report(m, r, c, date=DATE, include_glossary=False))
     assert "Glosario" not in without
+
+
+# --------------------------------------------------------------------------- #
+# Memoria con CombinationCheck (LRFD por combinaciones D / L)
+# --------------------------------------------------------------------------- #
+
+_L = 6000.0
+
+
+def _combo_beam(section, q_D: float, q_L: float, self_weight: bool = True):
+    """Viga simple: q_D (D) + q_L (L) uniformes; devuelve (modelo, CombinationCheck)."""
+    from core.model import LoadCase
+    from core.verification import check_combinations
+
+    m = build_beam(_L, [BeamSupport(0, ST.PINNED), BeamSupport(_L, ST.ROLLER)], section, MAT,
+                   dist_loads=[BeamDistLoad(0.0, _L, q_D, q_D),
+                               BeamDistLoad(0.0, _L, q_L, q_L, case=LoadCase.LIVE)],
+                   self_weight=self_weight)
+    return m, check_combinations(m)
+
+
+def _slice(text: str, start: str, end: str) -> str:
+    return text[text.index(start):text.index(end, text.index(start))]
+
+
+def test_combination_report_service_alert_is_consistent():
+    """IPE 220, q_D = 2 + peso propio, q_L = 6 N/mm, L = 6 m: ELU verifica y ELS no (δ > L/300).
+
+    Portada y §1 documentan LRFD (σu ≤ φ·Sy) y el límite L/300; §3.3 informa la flecha de servicio
+    1.0D + 1.0L (no la mayorada); §4 da ALERTA con los motivos de `check.issues`; el equilibrio de
+    §3.1 se calcula con las cargas mayoradas de la combinación gobernante (residuo ≈ 0).
+    """
+    import re
+
+    m, chk = _combo_beam(get_section("IPE 220"), -2.0, -6.0)
+    assert chk.strength_ok and not chk.deflection_ok and chk.verdict == (Status.ALERT, "ALERTA")
+    text = _flat(_text(build_pdf_report(m, chk.governing_results, chk, date=DATE)))
+
+    cover = text[:text.index("1. Bases de cálculo")]
+    assert "LRFD" in cover and "L/300" in cover and "FS ≥" not in cover
+    basis = _slice(text, "1. Bases de cálculo", "2. Datos de entrada")
+    assert "sin límite" not in basis and "FS" not in basis
+    assert "φ = 0.9" in basis and "L/300" in basis and "1.0D + 1.0L" in basis
+
+    deformation = _slice(text, "3.3 Deformación de servicio (1.0D + 1.0L)", "4. Verificación")
+    sv = chk.service_check
+    assert f"{sv.delta_max:,.2f} mm" in deformation
+    assert f"L/{sv.deflection_ratio:,.0f}" in deformation
+    delta_u = chk.governing_results.extreme("deflection").value
+    assert f"{abs(delta_u):,.2f} mm" not in deformation  # nunca la flecha mayorada
+
+    found = re.search(r"Residuo relativo \|ΣR \+ ΣF\| / \|F\| = ([0-9.]+e[+-][0-9]+)", text)
+    assert found is not None
+    residual = float(found.group(1))
+    assert residual < 1e-9
+    assert "cargas mayoradas (1.2D + 1.6L)" in text or "cargas mayoradas (1.4D)" in text
+
+    verdict = text[text.index("VEREDICTO"):text.index("5. Limitaciones")]
+    assert verdict.startswith("VEREDICTO: ALERTA") and "OK — VERIFICA" not in text
+    assert "ELS 1.0D + 1.0L" in verdict
+
+
+@pytest.mark.parametrize(("factor", "label"), [(1.0, "NO VERIFICA"), (2.0, "FLUENCIA")])
+def test_combination_report_uls_failure(factor, label):
+    """σu(1.2D + 1.6L) ≈ 0.95·Sy (φ·Sy < σu ≤ Sy) ⇒ NO VERIFICA; con el doble de L, σu > Sy ⇒ FLUENCIA.
+
+    σu = (1.2·|q_D| + 1.6·|q_L|)·L²/8 · c/I (sección propia, sin peso propio). Ambos en rojo (FAIL).
+    """
+    from core.materials import custom
+
+    I, c, sy = 2.0e7, 100.0, MAT.Sy
+    q_L = -((0.95 * sy * I / c * 8 / _L**2) - 1.2 * 5.0) / 1.6
+    m, chk = _combo_beam(custom("t", A=3000.0, I=I, c=c), -5.0, factor * q_L, self_weight=False)
+    assert chk.verdict == (Status.FAIL, label)
+    text = _flat(_text(build_pdf_report(m, chk.governing_results, chk, date=DATE)))
+    verdict = text[text.index("VEREDICTO"):text.index("5. Limitaciones")]
+    assert verdict.startswith(f"VEREDICTO: {label}")
+    assert "ELU 1.2D + 1.6L" in verdict
+
+
+def test_combination_report_ok():
+    m, chk = _combo_beam(get_section("IPE 300"), -2.0, -3.0)
+    assert chk.verdict == (Status.OK, "VERIFICA")
+    text = _flat(_text(build_pdf_report(m, chk.governing_results, chk, date=DATE)))
+    assert "VEREDICTO: OK — VERIFICA" in text
+
+
+# --------------------------------------------------------------------------- #
+# Resortes y cargas por hipótesis en la memoria
+# --------------------------------------------------------------------------- #
+
+
+def test_report_springs_units_and_inert_components():
+    """Tabla 2.2: Kx en kN/m (N/mm ≡ kN/m, sin factor) y Krz en kN·m/rad (×1e-6); un Kx sobre un
+    articulado (ux ya restringido) se informa "sin efecto" y no figura como rigidez activa."""
+    from core.model import Spring
+
+    m, _, _ = _beam(P=0.0)
+    m.supports = [replace(m.supports[0]), replace(m.supports[1], type=ST.FREE)]
+    last = len(m.nodes) - 1
+    m.springs = [Spring(0, kx=2500.0, krz=4.0e9), Spring(last, ky=5000.0)]
+    r = solve(m)
+    text = _flat(_text(build_pdf_report(m, r, check_safety(m, r), date=DATE)))
+    supports = _slice(text, "2.2 Condiciones de apoyo", "2.3 Cargas aplicadas")
+    assert "Krz=4000 kN·m/rad" in supports and "Kx sin efecto" in supports
+    assert "Kx=2500" not in supports and "Kx=2.5 kN/m" not in supports
+    assert "Elástico (Ky=5000 kN/m)" in supports  # libre + resorte vertical: 5000 N/mm = 5000 kN/m
+
+
+def test_report_load_labels_by_case():
+    """Con hipótesis L, el esquema rotula qD / qL; sin L, el rótulo sigue siendo q."""
+    from core.model import LoadCase
+
+    m = build_beam(6000.0, [BeamSupport(0, ST.PINNED), BeamSupport(6000.0, ST.ROLLER)],
+                   get_section("IPE 300"), MAT,
+                   point_loads=[BeamPointLoad(3000.0, Fy=-20_000.0, case=LoadCase.LIVE)],
+                   dist_loads=[BeamDistLoad(0.0, 6000.0, -8.0, -8.0),
+                               BeamDistLoad(0.0, 6000.0, -5.0, -5.0, case=LoadCase.LIVE)])
+    r = solve(m)
+    text = _flat(_text(build_pdf_report(m, r, check_safety(m, r), date=DATE)))
+    assert "qD = 8 kN/m" in text and "qL = 5 kN/m" in text and "20.0 kN (L)" in text
+    m0, r0, c0 = _beam()
+    text0 = _flat(_text(build_pdf_report(m0, r0, c0, date=DATE)))
+    assert "q = 10 kN/m" in text0 and "qD =" not in text0

@@ -126,3 +126,66 @@ def test_suggest_section_discards_excessive_deflection():
     assert absolute.check.deflection_limit_ratio == pytest.approx(L / 40.0)
     with pytest.raises(ValueError):
         suggest_section(build, "IPE", 1.5, max_deflection=0.0)
+
+
+# --------------------------------------------------------------------------- #
+# suggest_section por combinaciones (mismo criterio que el veredicto de la app)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("q_D", "q_L", "lighter_fails"),
+    [
+        # ELU gobierna: σ_u = (1.2·q_D + 1.6·q_L)·L²/8 / W > φ·Sy en el perfil inmediato inferior
+        (-10.0, -10.0, "ELU"),
+        # ELS gobierna: δ(1.0D + 1.0L) = 5·(q_D + q_L)·L⁴/(384EI) > L/300 en el perfil inmediato inferior
+        (-1.0, -3.0, "ELS"),
+    ],
+)
+def test_suggest_section_with_combinations(q_D, q_L, lighter_fails):
+    """Con φ: el perfil sugerido verifica `check_combinations` (ELU 1.4D / 1.2D + 1.6L con
+    σ_u ≤ φ·Sy y ELS 1.0D + 1.0L ≤ L/300) y el inmediato inferior de la familia no."""
+    from core.materials import SECTIONS
+    from core.model import LoadCase
+    from core.verification import PHI_DEFAULT, check_combinations
+
+    def build(sec: Section):
+        return build_beam(L, [BeamSupport(0.0, ST.PINNED), BeamSupport(L, ST.ROLLER)], sec, MAT,
+                          dist_loads=[BeamDistLoad(0.0, L, q_D, q_D),
+                                      BeamDistLoad(0.0, L, q_L, q_L, case=LoadCase.LIVE)])
+
+    sug = suggest_section(build, "IPE", 1.5, phi=PHI_DEFAULT)
+    assert sug is not None and sug.combination is not None
+    assert sug.combination.ok and sug.check is sug.combination.strength
+    assert check_combinations(build(sug.section)).ok
+    family = sorted(SECTIONS["IPE"].values(), key=lambda s: s.A)
+    lighter = family[family.index(sug.section) - 1]
+    chk = check_combinations(build(lighter))
+    assert not chk.ok
+    assert (not chk.strength_ok) if lighter_fails == "ELU" else (chk.strength_ok and not chk.deflection_ok)
+
+
+def test_suggest_section_combinations_vs_unfactored_fs():
+    """q_D = q_L = 10 N/mm + peso propio, L = 6 m (caso de la auditoría QA): el criterio previo
+    (FS ≥ 1,5 con D + L sin mayorar ⇒ σ ≤ 0,667·Sy) admite IPE 300, que no verifica ELU
+    (1.2D + 1.6L ≈ 1.4·(D + L) ⇒ σ ≤ φ·Sy/1,4 = 0,643·Sy; utilización ≈ 102 %). Con φ la sugerencia
+    es IPE 330 y coincide con el veredicto por combinaciones."""
+    from core.model import LoadCase
+    from core.verification import check_combinations
+
+    span = 6000.0
+
+    def build(sec: Section):
+        return build_beam(span, [BeamSupport(0.0, ST.PINNED), BeamSupport(span, ST.ROLLER)], sec, MAT,
+                          dist_loads=[BeamDistLoad(0.0, span, -10.0, -10.0),
+                                      BeamDistLoad(0.0, span, -10.0, -10.0, case=LoadCase.LIVE)],
+                          self_weight=True)
+
+    legacy = suggest_section(build, "IPE", 1.5, deflection_limit_ratio=0.0)
+    lrfd = suggest_section(build, "IPE", 1.5, deflection_limit_ratio=0.0, phi=0.9)
+    assert legacy is not None and lrfd is not None
+    assert (legacy.section.name, lrfd.section.name) == ("IPE 300", "IPE 330")
+    legacy_chk = check_combinations(build(legacy.section), deflection_limit_ratio=0.0)
+    assert not legacy_chk.strength_ok and legacy_chk.utilization > 1.0
+    with pytest.raises(ValueError, match="φ"):
+        suggest_section(build, "IPE", 1.5, phi=0.0)

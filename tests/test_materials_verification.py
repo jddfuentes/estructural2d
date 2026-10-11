@@ -293,3 +293,15 @@ def test_every_family_has_a_note():
 def test_family_warnings(family, expected):
     """Canales (centro de corte fuera del alma) y chapa delgada llevan advertencia de alcance."""
     assert family_warnings(family) == expected
+
+
+def test_linear_mass_uses_material_density():
+    """m = A·ρ [kg/m] con A en m²: IPE 200 (A = 28.5 cm²) → acero 22.4 kg/m, Al 6061 7.70 kg/m.
+
+    `mass_per_m` sigue siendo la masa de catálogo en acero (ρ = 7850 kg/m³).
+    """
+    s = get_section("IPE 200")
+    al = MATERIALS["Al 6061-T6"]
+    assert s.linear_mass(al.rho) == pytest.approx(s.A * 1e-6 * 2700.0, rel=1e-12)
+    assert s.linear_mass(7850.0) == pytest.approx(s.mass_per_m, rel=1e-12)
+    assert s.linear_mass(al.rho) == pytest.approx(s.mass_per_m * 2700.0 / 7850.0, rel=1e-12)

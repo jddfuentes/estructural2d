@@ -9,4 +9,5 @@ ruff==0.16.10
 anastruct==1.7.0
 # Lectura de PDF en tests/test_reports.py (verificación del contenido de la memoria)
 pypdf==6.19.0
-kaleido
+# Exportación PNG de Plotly en app.py (también en requirements.txt; acá para entornos sólo-dev)
+kaleido>=0.2.1

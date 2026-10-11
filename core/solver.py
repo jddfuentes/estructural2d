@@ -50,6 +50,7 @@ from core.model import LoadCase, LoadCombination, LoadDirection, Model
 FloatArray = NDArray[np.float64]
 
 _COND_LIMIT = 1e12  # número de condición (matriz escalada) para declarar mecanismo
+_TIE_RTOL = 1e-12  # empate numérico de |valor| en `Results.extreme` (diferencias de redondeo)
 _GAUSS_X, _GAUSS_W = np.polynomial.legendre.leggauss(4)
 
 
@@ -133,12 +134,18 @@ class Results:
     members: list[MemberResult] = field(default_factory=list)
 
     def extreme(self, quantity: str) -> Extreme:
-        """Máximo en valor absoluto de: 'N', 'V', 'M', 'sigma', 'deflection', 'uy'."""
+        """Máximo en valor absoluto de: 'N', 'V', 'M', 'sigma', 'deflection', 'uy'.
+
+        Desempate determinista: magnitudes que difieren menos de `_TIE_RTOL` (relativo) se
+        consideran iguales y gana la 1ª estación de la 1ª barra. Así el signo devuelto no depende
+        del redondeo de la plataforma (p. ej. V(0) = +qL/2 y V(L) = −qL/2 en una viga simétrica).
+        """
         best: Extreme | None = None
         for mr in self.members:
             arr = _quantity(mr, quantity)
-            k = int(np.argmax(np.abs(arr)))
-            if best is None or abs(arr[k]) > abs(best.value):
+            mag = np.abs(arr)
+            k = int(np.flatnonzero(mag >= mag.max() * (1.0 - _TIE_RTOL))[0])  # empate: 1ª estación
+            if best is None or mag[k] > abs(best.value) * (1.0 + _TIE_RTOL):  # empate: 1ª barra
                 best = Extreme(
                     value=float(arr[k]), member=mr.member, x=float(mr.x[k]),
                     point=(float(mr.points[k, 0]), float(mr.points[k, 1])),
@@ -359,7 +366,21 @@ def solve_combinations(
 
     Sin cargas L, una combinación con γ_D = 1 devuelve exactamente `solve(model)`.
     """
-    cases = solve_load_cases(model, n_stations)
+    return combine_cases(solve_load_cases(model, n_stations), combinations)
+
+
+def combine_cases(
+    cases: dict[LoadCase, Results], combinations: Sequence[LoadCombination]
+) -> list[Results]:
+    """Combina respuestas ya resueltas por hipótesis (salida de `solve_load_cases`), sin resolver.
+
+    Permite resolver D y L una sola vez y reutilizarlas (p. ej. verificación + diagramas en la UI).
+
+    Raises:
+        ValueError: falta la hipótesis D.
+    """
+    if LoadCase.DEAD not in cases:
+        raise ValueError("Faltan los resultados de la hipótesis D (usar `solve_load_cases`).")
     res_D, res_L = cases[LoadCase.DEAD], cases.get(LoadCase.LIVE)
     out: list[Results] = []
     for comb in combinations:

@@ -272,3 +272,108 @@ def test_service_deflection_limit_triggers_alert():
     chk = check_combinations(beam(q_D=q_D, P_L=P_L), deflection_limit_ratio=2.0 * L / delta)
     assert chk.strength_ok and not chk.deflection_ok and chk.status is Status.ALERT
     assert chk.issues[-1].startswith("ELS 1.0D + 1.0L")
+
+
+# --------------------------------------------------------------------------- #
+# Test 4: extremos deterministas (empates numéricos de |valor|)
+# --------------------------------------------------------------------------- #
+
+
+def test_extreme_tie_symmetric_beam_is_deterministic():
+    """Viga simple simétrica (q_D uniforme + P_L en L/2): V(0) = +V_u/2 = −V(L), con
+    V_u = 1.2·|q_D|·L + 1.6·|P_L| (equilibrio vertical). Empate de |V| ⇒ 1ª estación de la 1ª barra
+    (x = 0, V > 0), igual en la superposición y en la corrida única, en cualquier plataforma."""
+    q_D, P_L = -12.0, -35_000.0
+    V_half = (1.2 * abs(q_D) * L + 1.6 * abs(P_L)) / 2  # 71 200 N
+    combined = solve_combinations(beam(q_D=q_D, P_L=P_L), [COMB_1_2D_1_6L])[0]
+    scaled = solve(build_beam(L, SIMPLE, SEC, MAT, [BeamPointLoad(L / 2, Fy=1.6 * P_L)],
+                              [BeamDistLoad(0.0, L, 1.2 * q_D, 1.2 * q_D)]))
+    for res in (combined, scaled):
+        assert abs(res.members[0].V[0]) == pytest.approx(abs(res.members[-1].V[-1]), rel=1e-12)  # empate
+        e = res.extreme("V")
+        assert e.value == pytest.approx(V_half, rel=REL) and e.value > 0.0
+        assert e.member == 0 and e.x == 0.0
+
+
+def test_extreme_tie_rule_with_rounding_noise():
+    """|V| que difieren en 1e-14 (ruido de redondeo) empatan ⇒ 1ª estación; una diferencia real
+    (1e-9 relativo, por encima de la tolerancia 1e-12) gana aunque esté más adelante."""
+    from dataclasses import replace
+
+    base = solve(beam(q_D=-10.0))
+    mr = base.members[0]
+    for later, expected in ((-100.0 * (1 + 1e-14), 100.0), (-100.0 * (1 + 1e-9), -100.0 * (1 + 1e-9))):
+        V = np.zeros_like(mr.V)
+        V[0], V[-1] = 100.0, later
+        res = Results(base.displacements, base.reactions, [replace(mr, V=V)])
+        assert res.extreme("V").value == expected
+
+
+# --------------------------------------------------------------------------- #
+# Test 5: una sola resolución reutilizable (combine_cases / case_results)
+# --------------------------------------------------------------------------- #
+
+
+def test_combine_cases_and_check_with_case_results(monkeypatch):
+    """check_combinations(case_results=solve_load_cases(m)) no vuelve a ensamblar K y da lo mismo."""
+    from core.solver import combine_cases
+
+    model = beam(q_D=-12.0, P_L=-35_000.0)
+    cases = solve_load_cases(model)
+    combos = [COMB_1_4D, COMB_1_2D_1_6L, COMB_SERVICE_D_L]
+    for a, b in zip(combine_cases(cases, combos), solve_combinations(model, combos), strict=True):
+        assert_same_results(a, b)
+
+    calls = {"n": 0}
+    original = solver_mod._assemble
+
+    def spy(m):
+        calls["n"] += 1
+        return original(m)
+
+    monkeypatch.setattr(solver_mod, "_assemble", spy)
+    reused = check_combinations(model, case_results=cases)
+    assert calls["n"] == 0
+    fresh = check_combinations(model)
+    assert calls["n"] == 1
+    assert reused.governing is fresh.governing and reused.utilization == pytest.approx(fresh.utilization)
+    assert len(reused.uls_results) == 2
+    assert_same_results(reused.uls_results[1], reused.governing_results)  # 1.2D + 1.6L gobierna
+    with pytest.raises(ValueError, match="hipótesis D"):
+        combine_cases({}, combos)
+
+
+def test_issue_texts_use_sy_notation():
+    """Los mensajes usan S_y (fluencia), no Fy (que en el glosario es una fuerza)."""
+    q_L = -((0.95 * SY * I / C * 8 / L**2) - 1.2 * 5.0) / 1.6
+    chk = check_combinations(beam(q_D=-5.0, q_L=q_L), deflection_limit_ratio=0.0)
+    assert "φ·Sy" in chk.issues[0] and "Fy" not in chk.issues[0]
+    assert "Sy =" in check_combinations(beam(q_D=-5.0, q_L=2 * q_L), deflection_limit_ratio=0.0).issues[0]
+
+
+# --------------------------------------------------------------------------- #
+# Test 6: hipótesis de q y H en el pórtico
+# --------------------------------------------------------------------------- #
+
+
+def test_portal_frame_load_cases():
+    """build_portal_frame: q y H en D por defecto; con beam_q_case / lateral_case = L pasan a L.
+
+    Con q en L gobierna 1.2D + 1.6L (q_L ≫ D), y ΣRy de 1.2D + 1.6L = −1.6·q·luz (sin peso propio).
+    """
+    from core.builders import build_portal_frame
+
+    span, height, qv, H = 8000.0, 4000.0, -12.0, 10_000.0
+    default = build_portal_frame(span, height, SEC, SEC, MAT, ST.FIXED, ST.FIXED, beam_q=qv, lateral_load=H)
+    assert {d.case for d in default.distributed_loads} == {LoadCase.DEAD}
+    assert default.nodal_loads[0].case is LoadCase.DEAD
+    live = build_portal_frame(span, height, SEC, SEC, MAT, ST.FIXED, ST.FIXED, beam_q=qv, lateral_load=H,
+                              beam_q_case=LoadCase.LIVE, lateral_case=LoadCase.LIVE)
+    assert {d.case for d in live.distributed_loads} == {LoadCase.LIVE}
+    assert live.nodal_loads[0].case is LoadCase.LIVE
+    chk = check_combinations(live)
+    assert chk.governing is COMB_1_2D_1_6L
+    Ry = sum(r[1] for r in chk.governing_results.reactions.values())
+    assert Ry == pytest.approx(-1.6 * qv * span, rel=REL)
+    Rx = sum(r[0] for r in chk.governing_results.reactions.values())
+    assert Rx == pytest.approx(-1.6 * H, rel=REL)

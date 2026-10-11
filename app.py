@@ -6,27 +6,31 @@ Nada de cálculo estructural acá.
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Callable
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
-from core.design import suggest_section
-from core.materials import family_warnings
-from core.model import COMB_1_2D_1_6L, COMB_1_4D, COMB_SERVICE_D_L, LoadCase, Model
+from core.design import Suggestion, suggest_section
+from core.materials import Section, family_warnings
+from core.model import COMB_SERVICE_D_L, LoadCase, Model
 from core.reports import build_pdf_report
-from core.solver import Results, StructuralError, solve_combinations, solve_load_cases
-from core.verification import CombinationCheck, SafetyCheck, Status, check_combinations
+from core.solver import Results, StructuralError, solve_load_cases
+from core.verification import FS_MIN_DEFAULT, CombinationCheck, Status, check_combinations
 from ui.inputs import AppInputs, sidebar
 from ui.plots import plot_diagram, plot_structure
 from ui.theory import render_theory
 
 st.set_page_config(page_title="Estructural 2D · Predimensionamiento", page_icon="📐", layout="wide")
 
+# Severidad del veredicto -> (texto, fondo). El rótulo sale de `CombinationCheck.verdict`.
 STATUS_STYLE = {
-    Status.OK: ("#15803D", "#DCFCE7", "VERIFICA"),
-    Status.ALERT: ("#B45309", "#FEF3C7", "ALERTA"),
-    Status.FAIL: ("#B91C1C", "#FEE2E2", "FLUENCIA"),
+    Status.OK: ("#15803D", "#DCFCE7"),
+    Status.ALERT: ("#B45309", "#FEF3C7"),
+    Status.FAIL: ("#B91C1C", "#FEE2E2"),
 }
 
 
@@ -36,26 +40,73 @@ def _pdf_filename(title: str) -> str:
     return f"{filename or 'memoria'}.pdf"
 
 
-def fs_badge(chk: SafetyCheck | CombinationCheck) -> None:
-    if isinstance(chk, CombinationCheck):
-        chk = chk.strength
-    fg, bg, label = STATUS_STYLE[chk.status]
-    fs_txt = "∞" if chk.fs == float("inf") else f"{chk.fs:.2f}"
+def verdict_badge(chk: CombinationCheck) -> None:
+    """Estado GLOBAL (ELU + ELS): rojo si no verifica ELU, amarillo si sólo falla la flecha de servicio."""
+    severity, label = chk.verdict
+    fg, bg = STATUS_STYLE[severity]
+    sv = chk.service_check
+    ratio = "∞" if not math.isfinite(sv.deflection_ratio) else f"{sv.deflection_ratio:,.0f}"
+    limit = f" (adm. L/{sv.deflection_limit_ratio:g})" if sv.deflection_limit_ratio > 0 else ""
+    util = f"ELU {chk.utilization:.0%}"
     st.markdown(
         f"""<div style="background:{bg};border-left:6px solid {fg};padding:0.6rem 0.9rem;border-radius:6px">
         <div style="color:{fg};font-size:0.8rem;font-weight:700;letter-spacing:.06em">{label}</div>
-        <div style="color:{fg};font-size:1.9rem;font-weight:800;line-height:1.1">FS = {fs_txt}</div>
-        <div style="color:{fg};font-size:0.8rem">mín. {chk.fs_min:g} · Sy = {chk.sy:g} MPa</div></div>""",
+        <div style="color:{fg};font-size:1.9rem;font-weight:800;line-height:1.1">{util}</div>
+        <div style="color:{fg};font-size:0.8rem">σu/(φ·Sy) · {chk.governing.name} · φ = {chk.phi:g} ·
+        Sy = {chk.strength.sy:g} MPa<br>ELS {chk.service_combination.name}: L/{ratio}{limit}</div></div>""",
         unsafe_allow_html=True,
     )
 
 
+# --------------------------------------------------------------------------- #
+# Caché por modelo (AGENTS.md §6: el core no cachea; la UI sí). La clave es `repr(model)`, que
+# cubre geometría, secciones, cargas, apoyos y resortes: cambiar de pestaña o de diagrama no vuelve
+# a resolver, ni a exportar el PNG, ni a generar el PDF.
+# --------------------------------------------------------------------------- #
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _analysis(key: str, _model: Model, deflection_limit_ratio: float
+              ) -> tuple[dict[LoadCase, Results], CombinationCheck]:
+    """D y L se resuelven UNA vez (K ensamblada una vez); las combinaciones se superponen."""
+    cases = solve_load_cases(_model)
+    return cases, check_combinations(_model, deflection_limit_ratio=deflection_limit_ratio,
+                                     case_results=cases)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _png(key: str, _fig: go.Figure) -> bytes | None:
+    """PNG de la figura para el PDF (kaleido); None si kaleido/Chrome no está disponible."""
+    try:
+        return bytes(_fig.to_image(format="png", width=900, height=350, scale=2))
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _pdf(key: str, _model: Model, _chk: CombinationCheck, title: str, author: str,
+         image: bytes | None) -> bytes:
+    return build_pdf_report(_model, _chk.governing_results, _chk, title, author,
+                            reference_length=_chk.service_check.reference_length, image_bytes=image)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _suggestion(key: str, _build: Callable[[Section], Model], family: str,
+                deflection_limit_ratio: float, phi: float) -> Suggestion | None:
+    return suggest_section(_build, family, FS_MIN_DEFAULT,  # fs_min no se usa con φ
+                           deflection_limit_ratio=deflection_limit_ratio, phi=phi)
+
+
 def reactions_table(model: Model, res: Results) -> pd.DataFrame:
     rows = []
+    springs = {sp.node: sp for sp in model.springs}
     for sup in model.supports:
         Rx, Ry, Mz = res.reactions[sup.node]
         x, y = model.nodes[sup.node]
-        rows.append({"Nodo": sup.node, "Tipo": sup.type.value, "x [m]": x / 1e3, "y [m]": y / 1e3,
+        sp = springs.get(sup.node)
+        elastic = sp is not None and not sp.active(sup.type).is_null
+        kind = sup.type.value + (" + elástico" if elastic else "")
+        rows.append({"Nodo": sup.node, "Tipo": kind, "x [m]": x / 1e3, "y [m]": y / 1e3,
                      "Rx [kN]": Rx / 1e3, "Ry [kN]": Ry / 1e3, "Mz [kN·m]": Mz / 1e6})
     return pd.DataFrame(rows)
 
@@ -68,7 +119,8 @@ def main() -> None:
     model: Model | None = None
     try:
         model = inp.model()
-        chk = check_combinations(model, deflection_limit_ratio=inp.deflection_limit_ratio)
+        key = repr(model)
+        case_results, chk = _analysis(key, model, inp.deflection_limit_ratio)
     except (ValueError, StructuralError) as exc:
         st.error(f"**No se pudo resolver el modelo:** {exc}")
         if model is not None:
@@ -81,7 +133,7 @@ def main() -> None:
     # ---- Indicadores ------------------------------------------------------- #
     c0, c1, c2, c3, c4 = st.columns([1.3, 1, 1, 1, 1])
     with c0:
-        fs_badge(chk)
+        verdict_badge(chk)
     strength = chk.strength
     c1.metric("σ máx", f"{strength.sigma_max:.1f} MPa", help="|N/A ± M·c/I| máximo en ELU")
     c2.metric("M máx", f"{abs(M.value) / 1e6:.2f} kN·m",
@@ -103,34 +155,36 @@ def main() -> None:
     with st.expander("Memoria de cálculo (PDF)"):
         report_title = st.text_input("Título", value="Memoria de Cálculo")
         author = st.text_input("Autor", value="")
-        fig_deformed = plot_structure(model, res, inp.deformed_scale)
-        try:
-            img_bytes = fig_deformed.to_image(format="png", width=900, height=350, scale=2)
-        except Exception:
-            st.sidebar.caption("Nota: Gráfico no incrustado en PDF (kaleido no disponible).")
-            img_bytes = None
-        pdf = build_pdf_report(model, res, chk, report_title, author,
-                               reference_length=chk.service_check.reference_length, image_bytes=img_bytes)
+        # Deformada de servicio (1.0D + 1.0L): la misma flecha que el indicador δ y que §3.3 del PDF
+        fig_deformed = plot_structure(model, chk.service_results, inp.deformed_scale)
+        fig_key = f"{key}|{inp.deflection_limit_ratio}|{inp.deformed_scale}"
+        img_bytes = _png(fig_key, fig_deformed)
+        if img_bytes is None:
+            st.caption("Nota: gráfico no incrustado en el PDF (kaleido no disponible).")
+        pdf = _pdf(fig_key, model, chk, report_title, author, img_bytes)
         st.download_button("Descargar memoria", data=pdf, file_name=_pdf_filename(report_title),
                            mime="application/pdf")
 
     # ---- Gráficos ---------------------------------------------------------- #
-    case_results = solve_load_cases(model)
-    elu_results = solve_combinations(model, [COMB_1_4D, COMB_1_2D_1_6L])
-    diagram_options = {
-        f"ELU: {COMB_1_4D.name}": elu_results[0],
-        f"ELU: {COMB_1_2D_1_6L.name}": elu_results[1],
-        f"ELS: {COMB_SERVICE_D_L.name}": chk.service_results,
-        "Hipótesis individual: D (Muerta)": case_results[LoadCase.DEAD],
-    }
+    # Sin re-resolver: combinaciones e hipótesis salen del mismo análisis (K ensamblada una vez)
+    diagram_options: dict[str, Results] = {}
+    for (comb, _), res_c in zip(chk.strength_checks, chk.uls_results, strict=True):
+        gov = " — gobierna" if comb is chk.governing else ""
+        diagram_options[f"ELU: {comb.name}{gov}"] = res_c
+    diagram_options[f"ELS: {chk.service_combination.name}"] = chk.service_results
+    diagram_options["Hipótesis D (permanente)"] = case_results[LoadCase.DEAD]
     if LoadCase.LIVE in case_results:
-        diagram_options["Hipótesis individual: L (Viva)"] = case_results[LoadCase.LIVE]
-    selected_diagram = st.selectbox("Solicitaciones a visualizar", list(diagram_options))
+        diagram_options["Hipótesis L (sobrecarga)"] = case_results[LoadCase.LIVE]
+    labels = list(diagram_options)
+    governing_label = next(lbl for lbl in labels if lbl.endswith("— gobierna"))
+    selected_diagram = st.selectbox("Solicitaciones a visualizar", labels,
+                                    index=labels.index(governing_label))
     diagram_results = diagram_options[selected_diagram]
     tabs = st.tabs(["Estructura y deformada", "Momento M", "Corte V", "Normal N", "Tensión σ", "Reacciones",
                     "Predimensionamiento", "Bases teóricas"])
     with tabs[0]:
         st.plotly_chart(fig_deformed, width="stretch")
+        st.caption(f"Deformada de servicio ({COMB_SERVICE_D_L.name}, cargas sin mayorar).")
     with tabs[1]:
         st.plotly_chart(plot_diagram(model, diagram_results, "M", inp.moment_tension_side), width="stretch")
     with tabs[2]:
@@ -147,28 +201,34 @@ def main() -> None:
         st.dataframe(reactions_table(model, res), hide_index=True, width="stretch",
                      column_config={c: st.column_config.NumberColumn(format="%.3f")
                                     for c in ("x [m]", "y [m]", "Rx [kN]", "Ry [kN]", "Mz [kN·m]")})
-        st.caption("Reacciones en ejes globales: Rx → +, Ry ↑ +, Mz antihorario +.")
+        st.caption(f"Reacciones de la combinación ELU gobernante ({chk.governing.name}, cargas mayoradas), "
+                   "en ejes globales: Rx → +, Ry ↑ +, Mz antihorario +.")
     with tabs[6]:
-        _design_tab(inp)
+        _design_tab(inp, chk)
     with tabs[7]:
         render_theory()
 
 
-def _design_tab(inp: AppInputs) -> None:
+def _design_tab(inp: AppInputs, chk: CombinationCheck) -> None:
     if inp.family == "Personalizado":
         st.info("Elegí una familia del catálogo para buscar el perfil más liviano que verifica.")
         return
     target = "la viga" if inp.kind == "Viga" else "la viga del pórtico (columnas fijas)"
     _, c2 = st.columns(2)
-    st.write(f"Perfil **{inp.family}** de menor peso para {target} con FS ≥ {inp.fs_min:g}"
-             + (f" y δ ≤ L/{inp.deflection_limit_ratio:g}" if inp.deflection_limit_ratio else "") + ":")
-    sug = suggest_section(inp.builder, inp.family, inp.fs_min,
-                          deflection_limit_ratio=inp.deflection_limit_ratio)
+    uls = " y ".join(comb.name for comb, _ in chk.strength_checks)
+    st.write(f"Perfil **{inp.family}** de menor peso para {target} con σu ≤ φ·Sy (φ = {chk.phi:g}; {uls})"
+             + (f" y δ ≤ L/{inp.deflection_limit_ratio:g} con {chk.service_combination.name}"
+                if inp.deflection_limit_ratio else "") + ":")
+    # Mismo criterio que el veredicto superior: verificación completa por combinaciones
+    sug = _suggestion(f"{repr(inp.model())}|{inp.family}", inp.builder, inp.family,
+                      inp.deflection_limit_ratio, chk.phi)
     if sug is None:
         st.error("Ningún perfil de la familia verifica. Probá otra familia o reducí la luz/cargas.")
         return
     s = sug.section
-    c2.metric(s.name, f"{s.mass_per_m:.1f} kg/m", delta=f"FS = {sug.check.fs:.2f}", delta_color="off")
+    util = sug.combination.utilization if sug.combination is not None else sug.check.utilization
+    c2.metric(s.name, f"{s.linear_mass(inp.material.rho):.1f} kg/m", delta=f"ELU {util:.0%}",
+              delta_color="off")
     for warning in family_warnings(s.family):
         st.warning(warning)
     if s.name == inp.section.name:
