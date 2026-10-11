@@ -248,16 +248,19 @@ def _draw_spring(
     mixed_support = support_type is not None and support_type is not SupportType.FREE
     offset = 1.5 * s if mixed_support else 0.0
     if spring.kx > 0.0:
-        # a la altura del nudo, del lado opuesto a la barra (no pisa la viga ni la columna)
-        dx, _ = _member_dir_at(model, spring.node)
-        side = -math.copysign(1.0, dx) if abs(dx) > 0.1 else -1.0
+        # Hacia afuera de la estructura: a la izquierda en la mitad izquierda, a la derecha si no
+        xs = [x for x, _ in model.nodes]
+        side = -1.0 if x0 <= 0.5 * (min(xs) + max(xs)) else 1.0
         x_end = x0 + side * 2.4 * s
         x, y = _spring_points(x0, x_end, 0.45 * s, False)
         y = [v + y0 for v in y]
         fig.add_trace(go.Scatter(x=np.asarray(x) * M_TO, y=np.asarray(y) * M_TO, **style))
-        fig.add_trace(go.Scatter(x=np.full(2, x_end * M_TO), y=np.asarray([y0 - s, y0 + s]) * M_TO,
-                                 **{**style, "line": dict(color=C_SUPPORT, width=1.5)}))
-        labels.append(f"Kx = {spring.kx:g} kN/m")
+        fig.add_trace(go.Scatter(  # anclaje
+            x=np.full(2, x_end * M_TO),
+            y=np.asarray([y0 - s, y0 + s]) * M_TO,
+            **{**style, "line": dict(color=C_SUPPORT, width=1.5)},
+        ))
+        labels.append(f"Kx = {spring.kx * KN / M_TO:g} kN/m")  # N/mm -> kN/m (= 1)
     if spring.ky > 0.0:
         x, y = _spring_points(y0, y0 - 2.4 * s, 0.45 * s, True)
         x = [v + x0 + offset for v in x]
@@ -275,7 +278,7 @@ def _draw_spring(
                 y=np.full(2, ground_y * M_TO),
                 **{**style, "line": dict(color=C_SUPPORT, width=1.5)},
             ))
-        labels.append(f"Ky = {spring.ky:g} kN/m")
+        labels.append(f"Ky = {spring.ky * KN / M_TO:g} kN/m")
     if spring.krz > 0.0:
         # con apoyo rígido: arco superior, fuera del triángulo
         angles = (np.linspace(-0.15 * math.pi, 1.15 * math.pi, 30) if mixed_support

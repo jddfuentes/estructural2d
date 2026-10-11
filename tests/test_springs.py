@@ -321,6 +321,26 @@ def test_portal_spring_reactions_are_minus_k_times_u():
     assert sum(v[0] for v in r.reactions.values()) == pytest.approx(-5_000.0, rel=1e-12)
 
 
+def test_free_support_restrains_nothing():
+    """SupportType.FREE no restringe GDL: base "libre" + resortes = mismo resultado que sólo resortes."""
+    assert ST.FREE.restrained_dofs == (False, False, False)
+    springs_only = _portal_on_springs()
+    with_free = _portal_on_springs()
+    with_free.supports = [Support(0, ST.FREE), Support(3, ST.FREE)]
+    r0, r1 = solve(springs_only), solve(with_free)
+    assert np.array_equal(r0.displacements, r1.displacements)
+    assert r0.reactions == r1.reactions
+
+
+def test_free_support_without_springs_is_mechanism():
+    """Sólo apoyos "libres" y sin resortes: no hay vínculo -> StructuralError."""
+    m = _portal_on_springs()
+    m.springs = []
+    m.supports = [Support(0, ST.FREE), Support(3, ST.FREE)]
+    with pytest.raises(StructuralError):
+        solve(m)
+
+
 def test_springs_only_without_horizontal_stiffness_is_mechanism():
     """Pórtico sobre resortes verticales y rotacionales pero kx = 0 en ambas bases: mecanismo."""
     m = _portal_on_springs()

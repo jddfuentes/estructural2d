@@ -243,3 +243,26 @@ def test_app_warns_inert_spring_on_restrained_dof():
 
     assert not at.exception, [e.message for e in at.exception]
     assert any("Kx no trabaja" in w.value for w in at.sidebar.warning)
+
+
+def test_app_portal_free_bases_with_springs_reactions():
+    """AppTest: pórtico con bases "libre" + resortes resuelve y la tabla de reacciones las lista."""
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60).run()
+    at.sidebar.radio[0].set_value("Pórtico").run()
+    for label in ("Base izquierda", "Base derecha"):
+        next(s for s in at.sidebar.selectbox if s.label == label).set_value("libre")
+    for side in ("l", "r"):
+        at.sidebar.number_input(key=f"portal_kx_{side}").set_value(20_000.0)
+        at.sidebar.number_input(key=f"portal_ky_{side}").set_value(500_000.0)
+        at.sidebar.number_input(key=f"portal_krz_{side}").set_value(30_000.0)
+    at.run()
+
+    assert not at.exception, [e.message for e in at.exception]
+    assert not at.error, [e.value for e in at.error]
+    tables = [d.value for d in at.dataframe if "Rx [kN]" in d.value.columns]
+    assert tables and set(tables[0]["Tipo"]) == {"elástico"}
+    # La tabla es de la combinación ELU gobernante: sin cargas L gobierna 1.4D ⇒ ΣRx = −1.4·H = −14 kN
+    assert abs(tables[0]["Rx [kN]"].sum() + 1.4 * 10.0) < 1e-6

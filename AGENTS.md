@@ -106,10 +106,18 @@ Notación: fluencia **S<sub>y</sub>** (`Sy`) en mensajes, PDF y glosario; `Fx`, 
   Reacción del resorte sobre la estructura **R = −k·u** (opuesta al desplazamiento/giro), incluida en
   `Results.reactions[node]` junto con la del `Support` del mismo nudo si lo hay. `Results.reactions`
   trae también los nodos que sólo tienen resorte. Un modelo puede apoyarse sólo en resortes.
-  Un `k` sobre un GDL que el `Support` del nudo ya restringe **no trabaja** (u = 0): `Spring.inert(type)`
+- `SupportType.FREE` (`"libre"`) no restringe ningún GDL (`restrained_dofs = (False, False, False)`):
+  sirve para que la UI declare un apoyo puramente elástico. No se dibuja símbolo rígido; libre sin
+  resorte ⇒ mecanismo (`StructuralError`).
+- Presentación de resortes (UI y PDF): Kx, Ky en kN/m (= N/mm) y Krz en kN·m/rad; rótulo del vínculo
+  `"<rígido> + elástico"`, o `"elástico"` si el nodo es libre o sólo tiene resorte; la tabla de
+  reacciones (app y PDF) lista también los nodos que sólo tienen resorte. Kx se dibuja hacia afuera
+  de la estructura.
+- Resortes inertes: un `k` sobre un GDL que el `Support` del nudo ya restringe **no trabaja** (u = 0):
+  `Spring.inert(type)`
   lo detecta y `Spring.active(type)` lo anula. La UI avisa y lo descarta; `ui/plots.py` y el PDF dibujan
-  sólo resortes activos (Kx del lado opuesto a la barra, Ky corrido y Krz como arco superior si hay
-  apoyo rígido) y la tabla 2.2 informa el inerte como "sin efecto".
+  sólo resortes activos (Kx hacia afuera de la estructura; con apoyo rígido, Ky corrido y Krz como arco
+  superior) y la tabla 2.2 informa el inerte como "sin efecto".
 - Dibujo de hipótesis (UI y PDF, misma convención): D naranja, L violeta; en una barra con D y L del
   mismo sentido la L se apila sobre la D y el rótulo de la D pasa al otro lado de la barra; con cargas L
   los rótulos indican la hipótesis (`qD`, `qL`, `(D)`, `(L)`). Una entrada de leyenda por hipótesis.
@@ -289,8 +297,9 @@ búsqueda del perfil más liviano.
 Backlog priorizado (no implementar sin tarea explícita):
 1. ~~Rótulas internas y apoyos elásticos~~ → **completado**: core (`Member.release_start/release_end`,
    `Spring`, `Model.springs`), UI (editor de rótulas con una fila fija por barra, resortes Kx/Ky/Krz y apoyo
-   `libre`), símbolos en `ui/plots.py` y PDF (glosario en `core/glossary.py`). Tests: `test_hinges.py`,
-   `test_springs.py`.
+   `libre`), símbolos en `ui/plots.py` y PDF (glosario en `core/glossary.py`), tabla de reacciones con
+   nodos elásticos. Tests: `test_hinges.py`, `test_springs.py`, `test_reports.py`, `test_plots.py`,
+   `test_architecture_and_app.py`.
 2. ~~Combinaciones de carga D / L (CIRSOC 301 / AISC 360 LRFD)~~ → **completado**: core (`LoadCase`,
    `LoadCombination`, `solve_load_cases`, `combine_results`, `solve_combinations`, `check_combinations`,
    `CombinationCheck.verdict`), UI (hipótesis D/L por carga, veredicto global, diagramas por combinación,

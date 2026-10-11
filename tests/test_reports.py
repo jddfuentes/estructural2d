@@ -359,7 +359,7 @@ def test_report_springs_units_and_inert_components():
     supports = _slice(text, "2.2 Condiciones de apoyo", "2.3 Cargas aplicadas")
     assert "Krz=4000 kN·m/rad" in supports and "Kx sin efecto" in supports
     assert "Kx=2500" not in supports and "Kx=2.5 kN/m" not in supports
-    assert "Elástico (Ky=5000 kN/m)" in supports  # libre + resorte vertical: 5000 N/mm = 5000 kN/m
+    assert "Elástico: Ky=5000 kN/m" in supports  # libre + resorte vertical: 5000 N/mm = 5000 kN/m
 
 
 def test_report_load_labels_by_case():
@@ -377,3 +377,46 @@ def test_report_load_labels_by_case():
     m0, r0, c0 = _beam()
     text0 = _flat(_text(build_pdf_report(m0, r0, c0, date=DATE)))
     assert "q = 10 kN/m" in text0 and "qD =" not in text0
+
+
+def _beam_with_springs():
+    """Viga 0—1—2: articulado + Krz en 0, sólo resorte Ky en 1 (sin `Support`), móvil en 2."""
+    from core.model import DistributedLoad, Member, Model, Spring, Support
+
+    sec = get_section("IPE 200")
+    m = Model(
+        nodes=[(0.0, 0.0), (3000.0, 0.0), (6000.0, 0.0)],
+        members=[Member(0, 1, sec, MAT), Member(1, 2, sec, MAT)],
+        supports=[Support(0, ST.PINNED), Support(2, ST.ROLLER)],
+        distributed_loads=[DistributedLoad(0, -10.0, -10.0), DistributedLoad(1, -10.0, -10.0)],
+        springs=[Spring(1, ky=1000.0), Spring(0, krz=5.0e9)],
+    )
+    r = solve(m)
+    return m, r, check_safety(m, r)
+
+
+def test_report_spring_stiffness_units_and_labels():
+    """2.2 Apoyos: Ky = 1000 N/mm se imprime 1000 kN/m (N/mm = kN/m) y Krz = 5e9 N·mm/rad = 5000 kN·m/rad.
+
+    Un nodo sólo con resorte se rotula "Elástico: …" (sin duplicar) y figura en 3.1 Reacciones.
+    """
+    m, r, c = _beam_with_springs()
+    text = _flat(_text(build_pdf_report(m, r, c, date=DATE)))
+    assert "0 0.000 0.000 Articulado + Elástico: Krz=5000 kN·m/rad ux, uy" in text  # 2.2
+    assert "1 3.000 0.000 Elástico: Ky=1000 kN/m —" in text
+    assert "ElásticoElástico" not in text
+    reactions = text[text.index("3.1 Reacciones"):text.index("3.2 ")]
+    assert "0 Articulado + elástico" in reactions and "1 Elástico" in reactions
+
+
+def test_report_free_support_with_springs():
+    """Pórtico con bases "libre" + resortes: se rotulan como elásticas, sin símbolo rígido."""
+    from core.model import Spring
+
+    m = build_portal_frame(8000.0, 4000.0, get_section("IPE 240"), get_section("IPE 300"), MAT,
+                           ST.FREE, ST.FREE, beam_q=-12.0, lateral_load=10_000.0)
+    m.springs = [Spring(0, kx=2.0e4, ky=5.0e5, krz=3.0e10), Spring(3, kx=2.0e4, ky=5.0e5, krz=3.0e10)]
+    r = solve(m)
+    text = _flat(_text(build_pdf_report(m, r, check_safety(m, r), date=DATE)))
+    assert "Elástico: Kx=20000 kN/m, Ky=500000 kN/m, Krz=30000 kN·m/rad" in text
+    assert "Libre" not in text[:text.index("6. Glosario y simbología")]

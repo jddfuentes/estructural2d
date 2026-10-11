@@ -16,7 +16,7 @@ import streamlit as st
 
 from core.design import Suggestion, suggest_section
 from core.materials import Section, family_warnings
-from core.model import COMB_SERVICE_D_L, LoadCase, Model
+from core.model import COMB_SERVICE_D_L, LoadCase, Model, SupportType
 from core.reports import build_pdf_report
 from core.solver import Results, StructuralError, solve_load_cases
 from core.verification import FS_MIN_DEFAULT, CombinationCheck, Status, check_combinations
@@ -98,16 +98,19 @@ def _suggestion(key: str, _build: Callable[[Section], Model], family: str,
 
 
 def reactions_table(model: Model, res: Results) -> pd.DataFrame:
+    """Reacciones de apoyos rígidos y de resortes (incluye nodos sólo con resorte)."""
+    supports = {sup.node: sup.type for sup in model.supports}
     rows = []
-    springs = {sp.node: sp for sp in model.springs}
-    for sup in model.supports:
-        Rx, Ry, Mz = res.reactions[sup.node]
-        x, y = model.nodes[sup.node]
-        sp = springs.get(sup.node)
-        elastic = sp is not None and not sp.active(sup.type).is_null
-        kind = sup.type.value + (" + elástico" if elastic else "")
-        rows.append({"Nodo": sup.node, "Tipo": kind, "x [m]": x / 1e3, "y [m]": y / 1e3,
-                     "Rx [kN]": Rx / 1e3, "Ry [kN]": Ry / 1e3, "Mz [kN·m]": Mz / 1e6})
+    springs_by_node = {sp.node: sp for sp in model.springs}
+    for node, (Rx, Ry, Mz) in res.reactions.items():
+        kind = supports.get(node)
+        tipo = kind.value if kind is not None and kind is not SupportType.FREE else ""
+        sp = springs_by_node.get(node)
+        if sp is not None and not sp.active(kind).is_null:  # sólo resortes que trabajan
+            tipo = f"{tipo} + elástico" if tipo else "elástico"
+        x, y = model.nodes[node]
+        rows.append({"Nodo": node, "Tipo": tipo or SupportType.FREE.value, "x [m]": x / 1e3,
+                     "y [m]": y / 1e3, "Rx [kN]": Rx / 1e3, "Ry [kN]": Ry / 1e3, "Mz [kN·m]": Mz / 1e6})
     return pd.DataFrame(rows)
 
 
