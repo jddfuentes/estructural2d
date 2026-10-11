@@ -325,6 +325,11 @@ class CombinationCheck:
         return self.strength.sigma_vm_max
 
     @property
+    def shear_governs(self) -> bool:
+        """El corte combinado gobierna la resistencia de la combinación ELU."""
+        return self.strength.shear_governs
+
+    @property
     def delta_max(self) -> float:
         """|δ| máxima bajo la combinación de servicio [mm]."""
         return self.service_check.delta_max

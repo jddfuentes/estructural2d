@@ -200,11 +200,12 @@ def test_unicode_font_embedded():
     assert "σ" in text and "δ" in text
 
 
-@pytest.mark.parametrize("builder,n_figs", [(_beam, 6), (_portal, 7)])
+@pytest.mark.parametrize("builder,n_figs", [(_beam, 8), (_portal, 9)])
 def test_figures_numbered(builder, n_figs):
     """Convenciones + esquema + diagramas + deformada.
 
-    Viga: M, V, σ (N nulo) -> 6 figuras. Pórtico: M, V, N, σ -> 7 figuras.
+    Viga: M, V, σ, τ y σvM (N nulo) -> 8 figuras.
+    Pórtico: M, V, N, σ, τ y σvM -> 9 figuras.
     """
     m, r, c = builder()
     text = _text(build_pdf_report(m, r, c, date=DATE))
@@ -241,6 +242,20 @@ def test_sign_references_present():
     mb, rb, cb = _beam()
     beam_text = _text(build_pdf_report(mb, rb, cb, date=DATE))
     assert "+M" in beam_text and "+V" in beam_text  # ejes con sentido positivo en los diagramas
+
+
+def test_report_weak_axis_and_shear_properties() -> None:
+    """La memoria documenta la orientación débil, Q/t y las tensiones combinadas."""
+    section = get_section("IPE 200").weak_axis()
+    m, r, c = _beam(section=section.name.removesuffix(" (eje débil)"))
+    m.members = [replace(mem, section=section) for mem in m.members]
+    r = solve(m)
+    c = check_safety(m, r)
+    text = _flat(_text(build_pdf_report(m, r, c, date=DATE)))
+    for key in ("Eje débil", "Qmáx", "tweb", "Tensión tangencial máxima",
+                "Tensión de von Mises", "tensión de corte τ", "von Mises"):
+        assert key in text, key
+    assert build_pdf_report(m, r, c, date=DATE).startswith(b"%PDF")
 
 
 def test_glossary_section():

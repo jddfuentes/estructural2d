@@ -72,7 +72,13 @@ from core.model import (
     SupportType,
 )
 from core.solver import MemberResult, Results
-from core.verification import CombinationCheck, SafetyCheck, Status, default_reference_length
+from core.verification import (
+    CombinationCheck,
+    SafetyCheck,
+    Status,
+    default_reference_length,
+    member_stresses,
+)
 
 __all__ = ["build_pdf_report"]
 
@@ -113,10 +119,12 @@ VERDICT_TEXT: dict[Status, str] = {
 def _verdict_text(check: SafetyCheck) -> str:
     """Veredicto con el motivo: resistencia (FS) y/o servicio (flecha)."""
     if check.status is Status.OK:
-        return VERDICT_TEXT[Status.OK]
+        return VERDICT_TEXT[Status.OK] + (" — corte combinado gobierna" if check.shear_governs else "")
     reasons = []
     if check.status is Status.ALERT and not check.strength_ok:
         reasons.append("FS menor al admisible")
+    if check.shear_governs:
+        reasons.append("corte combinado gobierna")
     if not check.deflection_ok:
         reasons.append("flecha mayor a la admisible (servicio)")
     head = VERDICT_TEXT[check.status]
@@ -516,11 +524,15 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
                        f"{_g('r')} [kg/m{_sup(3)}]"],
                       rows, [0.30, 0.15, 0.13, 0.13, 0.12, 0.17], num_cols={1, 2, 3, 4, 5}))
     out.append(Spacer(1, 2 * mm))
-    rows = [[escape(s.name), f"{s.h:g}", f"{s.A * _CM2:,.2f}", f"{s.I * _CM4:,.1f}", f"{s.W * _CM3:,.1f}",
-             f"{s.c_max:g}", f"{s.A * 1e-6 * mat.rho:.2f}"] for s, mat in secs.values()]
-    out.append(_table(["Sección", "h [mm]", f"A [cm{_sup(2)}]", f"I [cm{_sup(4)}]", f"W [cm{_sup(3)}]",
-                       "c<sub>máx</sub> [mm]", "Masa [kg/m]"],
-                      rows, [0.24, 0.10, 0.12, 0.14, 0.12, 0.14, 0.14], num_cols={1, 2, 3, 4, 5, 6}))
+    rows = [[escape(s.name), "Eje débil" if s.name.endswith("(eje débil)") else "Eje fuerte",
+              f"{s.h:g}", f"{s.A * _CM2:,.2f}", f"{s.I * _CM4:,.1f}", f"{s.W * _CM3:,.1f}",
+              f"{s.Q_max * _CM3:,.1f}", f"{s.t_web:g}", f"{s.c_max:g}",
+              f"{s.A * 1e-6 * mat.rho:.2f}"] for s, mat in secs.values()]
+    out.append(_table(["Sección", "Orientación", "h [mm]", f"A [cm{_sup(2)}]",
+                       f"I [cm{_sup(4)}]", f"W [cm{_sup(3)}]", f"Q<sub>máx</sub> [cm{_sup(3)}]",
+                       "t<sub>web</sub> [mm]", "c<sub>máx</sub> [mm]", "Masa [kg/m]"],
+                      rows, [0.15, 0.12, 0.07, 0.09, 0.10, 0.09, 0.10, 0.08, 0.08, 0.12],
+                      num_cols={2, 3, 4, 5, 6, 7, 8, 9}))
     for fam in _families(model):
         if fam in FAMILY_NOTES:
             out.append(_p(f"<b>{escape(fam)}:</b> {escape(FAMILY_NOTES[fam])}", "note"))
@@ -594,6 +606,22 @@ def _section_results(model: Model, results: Results, L_ref: float, figs: _Figure
                [0.30, 0.17, 0.12, 0.11, 0.30], num_cols={1}),
         _p("Valor con signo del máximo en valor absoluto de toda la estructura.", "note"),
     ]))
+    stress_rows = []
+    tau_max = 0.0
+    vm_max = 0.0
+    tau_member = vm_member = 0
+    for mr in results.members:
+        stresses = member_stresses(model.members[mr.member].section, mr)
+        if float(np.max(stresses.tau)) > tau_max:
+            tau_max, tau_member = float(np.max(stresses.tau)), mr.member
+        if float(np.max(stresses.sigma_vm)) > vm_max:
+            vm_max, vm_member = float(np.max(stresses.sigma_vm)), mr.member
+    stress_rows.extend([
+        ["Tensión tangencial máxima τ", f"{tau_max:,.3f}", "MPa", str(tau_member), "—"],
+        ["Tensión de von Mises σvM", f"{vm_max:,.3f}", "MPa", str(vm_member), "—"],
+    ])
+    out.append(_table(["Tensión", "Valor máx.", "Unidad", "Barra", "Ubicación"], stress_rows,
+                      [0.30, 0.17, 0.12, 0.11, 0.30], num_cols={1}))
     if figs is not None:
         out += _diagram_figures(model, results, figs)
 
@@ -624,9 +652,11 @@ def _section_verification(check: SafetyCheck | CombinationCheck) -> list[Flowabl
     rows = [
         ["Tensión de fluencia S<sub>y</sub>", f"{check.sy:g} MPa"],
         [f"Tensión normal máxima |{_g('s')}|<sub>máx</sub>", f"{check.sigma_max:,.1f} MPa"],
+        ["Tensión tangencial máxima τ<sub>máx</sub>", f"{check.tau_max:,.1f} MPa"],
+        ["Tensión de von Mises gobernante σ<sub>vM</sub>", f"{check.sigma_vm_max:,.1f} MPa"],
         ["Ubicación crítica",
          f"barra {check.member}, ({check.point[0] * _M:.3f}; {check.point[1] * _M:.3f}) m"],
-        [f"Factor de seguridad FS = S<sub>y</sub> / {_g('s')}<sub>máx</sub>", f"<b>{fs_txt}</b>"],
+        ["Factor de seguridad FS = S<sub>y</sub> / σ<sub>vM</sub>", f"<b>{fs_txt}</b>"],
         ["Factor de seguridad admisible FS<sub>adm</sub>", f"{check.fs_min:g}"],
         [f"Aprovechamiento {_g('s')}<sub>máx</sub> · FS<sub>adm</sub> / S<sub>y</sub>",
          f"{check.utilization:.0%}"],
@@ -665,6 +695,8 @@ def _combination_verdict_text(check: CombinationCheck) -> tuple[Status, str]:
         "NO VERIFICA": f"{s}<sub>u</sub> &gt; {f}·S<sub>y</sub> (ELU {gov})",
         "ALERTA": f"flecha de servicio mayor a la admisible (ELS {escape(check.service_combination.name)})",
     }.get(label)
+    if check.strength.shear_governs:
+        detail = (detail + "; " if detail else "") + "corte combinado gobierna"
     head = VERDICT_TEXT[Status.OK] if label == "VERIFICA" else label
     return severity, head if detail is None else f"{head} — {detail}"
 
@@ -677,14 +709,17 @@ def _section_verification_combinations(check: CombinationCheck) -> list[Flowable
     for comb, chk in check.strength_checks:
         name = escape(comb.name) + (" (gobierna)" if comb is check.governing else "")
         uls_rows.append([f"<b>{name}</b>" if comb is check.governing else name,
-                         f"{chk.sigma_max:,.1f}", f"{check.phi * chk.sy:,.1f}", f"{chk.utilization:.0%}",
+                         f"{chk.sigma_vm_max:,.1f}", f"{check.phi * chk.sy:,.1f}", f"{chk.utilization:.0%}",
                          f"barra {chk.member}, ({chk.point[0] * _M:.3f}; {chk.point[1] * _M:.3f}) m"])
-    uls_table = _table(["Combinación ELU", f"{s}<sub>u</sub> [MPa]", f"{f}·S<sub>y</sub> [MPa]",
+    uls_table = _table(["Combinación ELU", "σ<sub>vM,u</sub> [MPa]", f"{f}·S<sub>y</sub> [MPa]",
                         "Utilización", "Ubicación crítica"], uls_rows,
                        [0.26, 0.15, 0.14, 0.13, 0.32], num_cols={1, 2, 3})
     rows = [
         ["Combinación gobernante ELU", f"<b>{escape(check.governing.name)}</b>"],
         ["Criterio de resistencia (LRFD)", f"{s}<sub>u</sub> ≤ {f}·S<sub>y</sub>, {f} = {check.phi:g}"],
+        ["Cortante máximo |V|<sub>máx</sub>", f"{check.governing_results.extreme('V').value * _KN:,.3f} kN"],
+        ["Tensión tangencial máxima τ<sub>máx</sub>", f"{check.tau_max:,.1f} MPa"],
+        ["Tensión de von Mises gobernante σ<sub>vM</sub>", f"{check.sigma_vm_max:,.1f} MPa"],
         [f"Utilización {s}<sub>u</sub> / ({f}·S<sub>y</sub>)", f"<b>{check.utilization:.0%}</b>"],
         [f"Flecha máxima ELS {d}<sub>máx</sub> ({escape(check.service_combination.name)})",
          f"{sv.delta_max:,.2f} mm"],
@@ -970,7 +1005,8 @@ C_DEFORMED = colors.HexColor("#2563EB")
 C_DIM = colors.HexColor("#7B8794")
 C_AXIS = colors.HexColor("#334E68")  # ejes de referencia (globales y locales)
 C_DIAG = {"M": colors.HexColor("#7C3AED"), "V": colors.HexColor("#0891B2"),
-          "N": colors.HexColor("#16A34A"), "sigma": colors.HexColor("#DC2626")}
+          "N": colors.HexColor("#16A34A"), "sigma": colors.HexColor("#DC2626"),
+          "tau": colors.HexColor("#EA580C"), "sigma_vm": colors.HexColor("#B91C1C")}
 
 # magnitud -> (título, unidad, factor de impresión)
 _DIAG_SPEC: dict[str, tuple[str, str, float]] = {
@@ -978,6 +1014,8 @@ _DIAG_SPEC: dict[str, tuple[str, str, float]] = {
     "V": ("Esfuerzo de corte V", "kN", _KN),
     "N": ("Esfuerzo normal N", "kN", _KN),
     "sigma": ("Tensión normal máxima |σ|", "MPa", 1.0),
+    "tau": ("Tensión de corte τ", "MPa", 1.0),
+    "sigma_vm": ("Tensión equivalente de von Mises σvM", "MPa", 1.0),
 }
 
 Pt = tuple[float, float]
@@ -1589,7 +1627,13 @@ def _fig_deformed(model: Model, results: Results, w: float) -> tuple[Drawing, fl
     return d, k
 
 
-def _values(mr: MemberResult, q: str) -> np.ndarray[Any, np.dtype[np.float64]]:
+def _values(mr: MemberResult, q: str, section: Section | None = None
+            ) -> np.ndarray[Any, np.dtype[np.float64]]:
+    if q in ("tau", "sigma_vm"):
+        if section is None:
+            raise ValueError("Los diagramas de tensiones requieren la sección de la barra.")
+        stresses = member_stresses(section, mr)
+        return stresses.tau if q == "tau" else stresses.sigma_vm
     return {"M": mr.M, "V": mr.V, "N": mr.N, "sigma": mr.sigma_abs}[q]
 
 
@@ -1599,7 +1643,9 @@ def _fig_beam_diagram(model: Model, results: Results, q: str, w: float, h: float
     color = C_DIAG[q]
     x0 = min(x for x, _ in model.nodes)
     xs = np.concatenate([mr.points[:, 0] for mr in results.members]) - x0
-    vs = np.concatenate([_values(mr, q) for mr in results.members]) * f
+    vs = np.concatenate([
+        _values(mr, q, model.members[mr.member].section) for mr in results.members
+    ]) * f
     plot = -vs if q == "M" else vs
     L = float(xs.max())
     pl, pr, pb, pt = 50.0, 24.0, 22.0, 16.0
@@ -1626,7 +1672,10 @@ def _fig_beam_diagram(model: Model, results: Results, q: str, w: float, h: float
     pos_down = q == "M"  # M positivo (tracción inferior) se dibuja hacia abajo
     tail, head = ((xa, y_top), (xa, y_bot)) if pos_down else ((xa, y_bot), (xa, y_top))
     _arrow(d, tail, head, C_AXIS, 0.8, 4.0)
-    sym = {"M": "+M", "V": "+V", "N": "+N", "sigma": f"|{_gt('s')}|"}[q]
+    sym = {
+        "M": "+M", "V": "+V", "N": "+N", "sigma": f"|{_gt('s')}|",
+        "tau": "τ", "sigma_vm": "σvM",
+    }[q]
     _label(d, xa, head[1] + (-9.0 if pos_down else 3.0), sym, 6.8, C_AXIS, bold=True, halo=False)
     for val in sorted({0.0, float(vs.max()), float(vs.min())}):  # marcas con el valor real (con signo)
         py = P(0.0, -val if pos_down else val)[1]
@@ -1660,14 +1709,15 @@ def _fig_frame_diagram(model: Model, results: Results, q: str, w: float) -> Draw
     h = _auto_height(model, w, pad, 120.0, 200.0)
     d = Drawing(w, h)
     view = _fit(model.nodes, w, h, pad)
-    vmax = max(float(np.abs(_values(mr, q)).max()) for mr in results.members) or 1.0
+    vmax = max(float(np.abs(_values(mr, q, model.members[mr.member].section)).max())
+               for mr in results.members) or 1.0
     scale = off_max / vmax
     _draw_members(d, model, view, C_MEMBER, 1.6)
     labels: list[tuple[Pt, float]] = []
     for mr in results.members:
         c, s = model.member_cos_sin(mr.member)
         ny = (-s, c)
-        v = _values(mr, q)
+        v = _values(mr, q, model.members[mr.member].section)
         sgn = -1.0 if q == "M" else 1.0  # M del lado traccionado
         base = [view(float(p[0]), float(p[1])) for p in mr.points]
         off = [(bx + sgn * float(vi) * scale * ny[0], by + sgn * float(vi) * scale * ny[1])
@@ -1693,8 +1743,9 @@ def _diagram_figures(model: Model, results: Results, figs: _Figures) -> list[Flo
     out: list[Flowable] = []
     beam = model.is_horizontal_beam()
     shown: list[str] = []
-    for q in ("M", "V", "N", "sigma"):
-        vmax = max(float(np.abs(_values(mr, q)).max()) for mr in results.members) * _DIAG_SPEC[q][2]
+    for q in ("M", "V", "N", "sigma", "tau", "sigma_vm"):
+        vmax = max(float(np.abs(_values(mr, q, model.members[mr.member].section)).max())
+                   for mr in results.members) * _DIAG_SPEC[q][2]
         if vmax < 5e-4:  # nulo a la precisión impresa (0.000 en las tablas)
             label = _DIAG_SPEC[q][0]
             out.append(_p(f"{label}: nulo en toda la estructura (no se grafica).", "note"))
