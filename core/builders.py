@@ -16,6 +16,7 @@ from core.materials import Material, Section
 from core.model import (
     SELF_WEIGHT,
     DistributedLoad,
+    LoadCase,
     LoadDirection,
     Member,
     Model,
@@ -40,6 +41,7 @@ class BeamPointLoad:
     Fy: float = 0.0  # [N]  (< 0 hacia abajo)
     Fx: float = 0.0  # [N]
     Mz: float = 0.0  # [N·mm] antihorario +
+    case: LoadCase = LoadCase.DEAD  # hipótesis de carga (D / L)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +50,7 @@ class BeamDistLoad:
     x_end: float  # [mm]
     q_start: float  # [N/mm] (= kN/m), < 0 hacia abajo
     q_end: float  # [N/mm]
+    case: LoadCase = LoadCase.DEAD  # hipótesis de carga (D / L)
 
 
 def self_weight_q(section: Section, material: Material) -> float:
@@ -100,7 +103,9 @@ def build_beam(
     model = Model(nodes=[(x, 0.0) for x in xs])
     model.members = [Member(i, i + 1, section, material) for i in range(len(xs) - 1)]
     model.supports = [Support(node_at(s.x), s.type) for s in supports]
-    model.nodal_loads = [NodalLoad(node_at(p.x), Fx=p.Fx, Fy=p.Fy, Mz=p.Mz) for p in point_loads]
+    model.nodal_loads = [
+        NodalLoad(node_at(p.x), Fx=p.Fx, Fy=p.Fy, Mz=p.Mz, case=p.case) for p in point_loads
+    ]
 
     for d in dist_loads:
         slope = (d.q_end - d.q_start) / (d.x_end - d.x_start)
@@ -113,6 +118,7 @@ def build_beam(
                         d.q_start + slope * (a - d.x_start),
                         d.q_start + slope * (b - d.x_start),
                         LoadDirection.GLOBAL_Y,
+                        case=d.case,
                     )
                 )
     if self_weight:
@@ -162,7 +168,7 @@ def build_portal_frame(
         model.nodal_loads.append(NodalLoad(top_l, Fx=lateral_load))
     for p in beam_point_loads:
         n = 1 + min(range(len(bx)), key=lambda k: abs(bx[k] - p.x))
-        model.nodal_loads.append(NodalLoad(n, Fx=p.Fx, Fy=p.Fy, Mz=p.Mz))
+        model.nodal_loads.append(NodalLoad(n, Fx=p.Fx, Fy=p.Fy, Mz=p.Mz, case=p.case))
     if beam_q:
         model.distributed_loads += [
             DistributedLoad(m, beam_q, beam_q, LoadDirection.GLOBAL_Y) for m in beam_members

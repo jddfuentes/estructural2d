@@ -7,6 +7,10 @@ Cada nodo tiene 3 GDL: (ux, uy, rz). Las barras son elementos de pórtico
 Euler-Bernoulli con rigidez axial y a flexión, opcionalmente con rótulas en sus extremos.
 
 Vínculos: rígidos (`Support`) y/o elásticos (`Spring`: resortes nodales kx, ky, krz).
+
+Hipótesis de carga: cada carga pertenece a un `LoadCase` (D = permanente, L = sobrecarga de uso;
+por defecto D). Las combinaciones normativas (`LoadCombination`) se arman en el solver por
+superposición lineal de las respuestas de cada hipótesis.
 """
 
 from __future__ import annotations
@@ -32,6 +36,13 @@ class SupportType(str, Enum):
             SupportType.ROLLER: (False, True, False),
             SupportType.FREE: (False, False, False),
         }[self]
+
+
+class LoadCase(str, Enum):
+    """Hipótesis (estado) de carga. Nomenclatura de CIRSOC 101-2005 / ASCE 7 (§2.3)."""
+
+    DEAD = "D"  # cargas permanentes: peso propio, terminaciones, equipos fijos
+    LIVE = "L"  # sobrecarga de uso (ocupación, mantenimiento, cargas móviles)
 
 
 class LoadDirection(str, Enum):
@@ -104,6 +115,10 @@ class NodalLoad:
     Fx: float = 0.0  # [N]
     Fy: float = 0.0  # [N]
     Mz: float = 0.0  # [N·mm], antihorario +
+    case: LoadCase = LoadCase.DEAD  # hipótesis de carga (acepta también "D" / "L")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "case", _as_load_case(self.case))
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +134,63 @@ class DistributedLoad:
     q_end: float
     direction: LoadDirection = LoadDirection.GLOBAL_Y
     label: str = ""  # etiqueta informativa (p.ej. SELF_WEIGHT); no afecta el cálculo
+    case: LoadCase = LoadCase.DEAD  # hipótesis de carga (acepta también "D" / "L")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "case", _as_load_case(self.case))
+
+
+def _as_load_case(case: LoadCase | str) -> LoadCase:
+    """Normaliza la hipótesis de carga ("D" / "L" o `LoadCase`); ValueError si no existe."""
+    try:
+        return LoadCase(case)
+    except ValueError:
+        valid = ", ".join(f"{c.value!r}" for c in LoadCase)
+        raise ValueError(f"Hipótesis de carga desconocida: {case!r}. Valores válidos: {valid}.") from None
+
+
+# Estados límite de una combinación (rótulos en castellano, se muestran tal cual en UI y PDF)
+ULS = "ELU"  # estado límite último (resistencia), cargas mayoradas
+SLS = "ELS"  # estado límite de servicio (flechas), cargas sin mayorar
+
+
+@dataclass(frozen=True, slots=True)
+class LoadCombination:
+    """Combinación lineal de hipótesis: γ_D·D + γ_L·L.
+
+    `limit_state`: "ELU" (resistencia, cargas mayoradas) o "ELS" (servicio, cargas de servicio).
+    """
+
+    name: str  # p. ej. "1.2D + 1.6L"
+    gamma_D: float
+    gamma_L: float
+    limit_state: str = ULS
+
+    def __post_init__(self) -> None:
+        if self.limit_state not in (ULS, SLS):
+            raise ValueError(
+                f"Combinación {self.name!r}: estado límite {self.limit_state!r} inválido; "
+                f"usar {ULS!r} (resistencia) o {SLS!r} (servicio)."
+            )
+        for g_name, g in (("γ_D", self.gamma_D), ("γ_L", self.gamma_L)):
+            if not (math.isfinite(g) and g >= 0.0):
+                raise ValueError(
+                    f"Combinación {self.name!r}: {g_name} = {g} no es válido; debe ser un número finito ≥ 0."
+                )
+
+    def factor(self, case: LoadCase) -> float:
+        """Factor de carga γ de la hipótesis `case` en esta combinación."""
+        return self.gamma_D if case is LoadCase.DEAD else self.gamma_L
+
+
+# Combinaciones estándar. Fuente: CIRSOC 301-2005 §A.4.2, ecs. (A.4-1) y (A.4-2), y AISC 360-16
+# §B2 (remite a ASCE/SEI 7 §2.3), combinaciones LRFD sin cargas de cubierta (Lr), nieve (S),
+# lluvia (R), viento (W) ni sismo (E). Servicio: AISC 360-16 cap. L y su comentario
+# (combinación de servicio D + L, cargas sin mayorar).
+COMB_1_4D = LoadCombination("1.4D", 1.4, 0.0, ULS)
+COMB_1_2D_1_6L = LoadCombination("1.2D + 1.6L", 1.2, 1.6, ULS)
+COMB_SERVICE_D_L = LoadCombination("1.0D + 1.0L", 1.0, 1.0, SLS)
+ULS_COMBINATIONS: tuple[LoadCombination, ...] = (COMB_1_4D, COMB_1_2D_1_6L)
 
 
 SELF_WEIGHT = "peso propio"
@@ -147,6 +219,15 @@ class Model:
         (x1, y1), (x2, y2) = self.nodes[mem.i], self.nodes[mem.j]
         L = math.hypot(x2 - x1, y2 - y1)
         return (x2 - x1) / L, (y2 - y1) / L
+
+    def load_cases(self) -> tuple[LoadCase, ...]:
+        """Hipótesis con al menos una carga, en el orden de `LoadCase` (D primero)."""
+        used = {p.case for p in self.nodal_loads} | {q.case for q in self.distributed_loads}
+        return tuple(c for c in LoadCase if c in used)
+
+    def has_live_loads(self) -> bool:
+        """True si alguna carga pertenece a la hipótesis L (sobrecarga de uso)."""
+        return LoadCase.LIVE in self.load_cases()
 
     def is_horizontal_beam(self) -> bool:
         """True si todos los nodos están sobre y = cte (viga continua)."""

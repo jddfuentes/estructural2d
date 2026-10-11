@@ -97,6 +97,17 @@ nunca devuelve ni pasa números convertidos al resto del core.
   Reacción del resorte sobre la estructura **R = −k·u** (opuesta al desplazamiento/giro), incluida en
   `Results.reactions[node]` junto con la del `Support` del mismo nudo si lo hay. `Results.reactions`
   trae también los nodos que sólo tienen resorte. Un modelo puede apoyarse sólo en resortes.
+- Hipótesis de carga: `NodalLoad.case` / `DistributedLoad.case` (y `BeamPointLoad` / `BeamDistLoad` de
+  `builders`) = `LoadCase.DEAD` (`"D"`, **por defecto**: el peso propio y toda carga sin `case` es D) o
+  `LoadCase.LIVE` (`"L"`). `solve()` resuelve **todas** las cargas con γ = 1 (sin L es la resolución de
+  siempre). Las combinaciones (`LoadCombination(name, gamma_D, gamma_L, limit_state)`, `"ELU"`/`"ELS"`)
+  se resuelven por superposición: K se ensambla una vez, se resuelven D y L y se combinan con
+  `combine_results` (exacto: `MemberResult.polynomials` guarda N, V, M, u, v por barra y se re-muestrea con
+  la misma regla de estaciones que `solve`). Estándar (CIRSOC 301-2005 §A.4.2 / AISC 360-16 §B2):
+  `COMB_1_4D`, `COMB_1_2D_1_6L` (ELU) y `COMB_SERVICE_D_L` = 1.0D + 1.0L (ELS).
+- Verificación por combinaciones (`check_combinations`): ELU σ_u ≤ φ·Fy con φ = 0.90 (AISC 360-16 §F1),
+  tensión elástica de primera fluencia; gobierna la combinación de máxima σ_u/(φ·Fy) (= máximo de la
+  envolvente). ELS: flecha bajo 1.0D + 1.0L **sin mayorar** contra L/N.
 
 Nombres físicos cortos (`E`, `I`, `A`, `L`, `M`, `V`, `N`, `q`) están permitidos y son
 preferidos en fórmulas (E741 deshabilitado en ruff).
@@ -118,6 +129,20 @@ core.verification.SafetyCheck: .status, .ok, .strength_ok, .issues; ELS: .delta_
 core.builders.build_beam(...) / build_portal_frame(...) -> Model
 core.model.Member(i, j, section, material, release_start=False, release_end=False)  # rótulas
 core.model.Spring(node, kx=0.0, ky=0.0, krz=0.0); Model.springs: list[Spring] = []  # resortes
+core.model.LoadCase.DEAD | LoadCase.LIVE  # "D" | "L"; campo `case=LoadCase.DEAD` al final de NodalLoad,
+                                          # DistributedLoad, BeamPointLoad, BeamDistLoad
+core.model.LoadCombination(name, gamma_D, gamma_L, limit_state="ELU")  # "ELU" | "ELS"
+core.model.COMB_1_4D, COMB_1_2D_1_6L, COMB_SERVICE_D_L, ULS_COMBINATIONS; Model.load_cases(), .has_live_loads()
+core.solver.solve_load_cases(model, n_stations=41) -> dict[LoadCase, Results]  # D siempre; L si hay
+core.solver.combine_results(res_D, res_L, gamma_D, gamma_L) -> Results         # superposición exacta
+core.solver.solve_combinations(model, combinations, n_stations=41) -> list[Results]  # K una sola vez
+core.solver.MemberResult.polynomials: MemberPolynomials | None                 # solución exacta por barra
+core.verification.check_combinations(model, phi=0.9, deflection_limit_ratio=300.0, reference_length=None,
+                                     uls_combinations=ULS_COMBINATIONS,
+                                     service_combination=COMB_SERVICE_D_L, n_stations=41) -> CombinationCheck
+core.verification.CombinationCheck: .governing, .strength, .utilization, .strength_checks, .status, .ok,
+                                    .issues; ELS: .service_combination, .service_check, .delta_max,
+                                    .deflection_ok; .governing_results, .service_results
 core.design.suggest_section(build, family, fs_min, max_deflection=None,
                             deflection_limit_ratio=300.0) -> Suggestion | None
 core.materials.SECTIONS[family][name] -> Section             # claves de familia estables (ver abajo)
@@ -232,7 +257,11 @@ Backlog priorizado (no implementar sin tarea explícita):
    pendiente: editor de resortes en la UI, símbolo de resorte en `ui/plots.py` / PDF (→ `core/glossary.py`)
    y listar en la tabla de reacciones de `app.py` / PDF los nodos que sólo tienen resorte (hoy iteran
    `model.supports`).
-2. Combinaciones de carga (CIRSOC 301 / AISC 360 LRFD-ASD).
+2. ~~Combinaciones de carga D / L (CIRSOC 301 / AISC 360 LRFD)~~ → hecho en el core (`LoadCase`,
+   `LoadCombination`, `solve_load_cases`, `combine_results`, `solve_combinations`, `check_combinations`;
+   `tests/test_load_combinations.py`). Pendiente: UI (hipótesis D/L por carga, combinación gobernante y
+   flecha de servicio en pantalla), PDF, carga viva uniforme en `build_portal_frame`, ASD y cargas
+   Lr / S / R / W / E.
 3. Pandeo flexional de columnas y pandeo lateral-torsional de vigas.
 4. Tensión de corte (τ = VQ/It) y von Mises combinada.
 5. Flexión en eje débil y secciones asimétricas (ya soportadas en `Section` vía `c_top/c_bot`).
