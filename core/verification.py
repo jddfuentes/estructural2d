@@ -1,21 +1,34 @@
 """Verificación estructural (postprocesamiento). Unidades: MPa, mm.
 
 Criterios MVP:
-- Resistencia: tensión normal elástica máxima (N/A ± M·c/I) frente a la fluencia
-  del material de cada barra. FS = Sy / σ_max ≥ FS_min.
+- Resistencia: tensión elástica equivalente de von Mises σ_vM (normal N/A ± M·c/I en la fibra
+  extrema y corte en el eje neutro, ver abajo) frente a la fluencia del material de cada barra.
+  FS = Sy / σ_vM ≥ FS_min (= Sy / σ_max cuando gobierna la flexión, caso usual).
 - Servicio (ELS): flecha relativa L/δ_max ≥ N (por defecto L/300), con δ_max el
   desplazamiento total máximo de la estructura y L la longitud de referencia
   (por defecto, el ancho horizontal del modelo = luz de la viga o del pórtico).
 
 Combinaciones de carga (`check_combinations`, hipótesis D y L):
 - ELU (resistencia), envolvente de 1.4D y 1.2D + 1.6L (LRFD): σ_u ≤ φ·Sy con φ = 0.90, sobre la
-  tensión normal elástica de las solicitaciones mayoradas (criterio de primera fluencia,
-  conservador frente al momento plástico). Gobierna la combinación de máxima utilización
-  σ_u / (φ·Sy), que es el máximo de la envolvente.
+  tensión elástica equivalente σ_vM (= normal en flexión dominante) de las solicitaciones
+  mayoradas (criterio de primera fluencia, conservador frente al momento plástico). Gobierna la
+  combinación de máxima utilización σ_u / (φ·Sy), que es el máximo de la envolvente.
 - ELS (servicio): flecha bajo 1.0D + 1.0L (cargas sin mayorar) frente a L/N.
 
-No incluye pandeo global, pandeo lateral-torsional, abolladura local,
-corte combinado (von Mises) ni fatiga.
+Corte y tensión equivalente (`member_stresses`, AGENTS.md §4):
+- τ(x) = |V(x)|·Q_max / (I·t_web), máxima en el eje neutro (Jourawski, elástico).
+- Tensiones normales con fibras asimétricas (convención del solver: M > 0 tracciona la inferior):
+  σ_top = N/A − M·c_top/I,  σ_bot = N/A + M·c_bot/I,  σ_max = máx(|σ_top|, |σ_bot|).
+- von Mises en dos puntos de la sección: fibra extrema (τ ≈ 0) → σ_vM,flex = σ_max; eje neutro
+  (σ = N/A, τ = τ_máx) → σ_vM,corte = √((N/A)² + 3·τ²). Gobierna σ_vM = máx de ambos.
+  FS = Sy / σ_vM,máx (y en ELU σ_vM,u ≤ φ·Sy). En flexión dominante σ_vM = σ_max y el resultado es
+  idéntico al de tensión normal pura; una sección sin datos de corte (Q = 0) toma τ = 0.
+- Eje débil: la sección se orienta con `Section.weak_axis()` (análisis plano en eje débil) o, para
+  un momento fuera del plano M_y, `weak_axis_bending_stress` da σ = |M_y| / W_y.
+
+No incluye pandeo global, pandeo lateral-torsional, abolladura local, tensión combinada en la unión
+ala-alma de perfiles doble T (se evalúan sólo fibra extrema y eje neutro), flexión esviada
+combinada ni fatiga.
 """
 
 from __future__ import annotations
@@ -27,8 +40,9 @@ from enum import Enum
 
 import numpy as np
 
+from core.materials import Section
 from core.model import COMB_SERVICE_D_L, SLS, ULS, ULS_COMBINATIONS, LoadCase, LoadCombination, Model
-from core.solver import MemberResult, Results, combine_cases, solve_combinations
+from core.solver import FloatArray, MemberResult, Results, combine_cases, solve_combinations
 
 FS_MIN_DEFAULT = 1.5
 
@@ -50,6 +64,70 @@ DEFLECTION_LIMIT_DEFAULT = 300.0
 PHI_DEFAULT = 0.90
 
 
+# Tolerancia relativa para decidir que el corte (von Mises en el eje neutro) gobierna sobre la
+# tensión normal: por debajo se considera empate y se informa como flexión (textos de siempre).
+_SHEAR_GOVERNS_RTOL = 1e-12
+
+
+def shear_stress(section: Section, V: FloatArray | float) -> FloatArray:
+    """Tensión de corte máxima de la sección (eje neutro) τ = |V|·Q_max / (I·t_web) [MPa].
+
+    V en N, Q en mm³, I en mm⁴, t en mm. Devuelve ceros si la sección no tiene datos de corte.
+    """
+    return np.abs(np.asarray(V, dtype=np.float64)) * section.shear_factor
+
+
+def von_mises(sigma: FloatArray | float, tau: FloatArray | float) -> FloatArray:
+    """Tensión equivalente de von Mises para estado plano σ-τ: σ_vM = √(σ² + 3·τ²) [MPa]."""
+    s = np.asarray(sigma, dtype=np.float64)
+    t = np.asarray(tau, dtype=np.float64)
+    out: FloatArray = np.sqrt(s * s + 3.0 * t * t)
+    return out
+
+
+def weak_axis_bending_stress(section: Section, M_y: float) -> float:
+    """Tensión normal máxima por flexión en eje débil σ = |M_y| / W_y [MPa] (M_y en N·mm).
+
+    Raises:
+        ValueError: la sección no tiene módulo resistente de eje débil (Wy ≤ 0).
+    """
+    if not section.Wy > 0.0:
+        raise ValueError(f"La sección {section.name!r} no tiene módulo resistente de eje débil Wy.")
+    return abs(M_y) / section.Wy
+
+
+@dataclass(frozen=True, slots=True)
+class MemberStresses:
+    """Tensiones de una barra en las estaciones de su `MemberResult` [MPa]."""
+
+    member: int
+    x: FloatArray  # estaciones locales [mm]
+    sigma_top: FloatArray  # σ fibra superior = N/A − M·c_top/I
+    sigma_bot: FloatArray  # σ fibra inferior = N/A + M·c_bot/I
+    sigma_max: FloatArray  # máx(|σ_top|, |σ_bot|) (fibra extrema)
+    sigma_axial: FloatArray  # N/A (eje neutro)
+    tau: FloatArray  # τ máx de la sección = |V|·Q/(I·t) (eje neutro)
+    sigma_vm_flex: FloatArray  # von Mises en la fibra extrema (τ ≈ 0) = σ_max
+    sigma_vm_shear: FloatArray  # von Mises en el eje neutro = √((N/A)² + 3τ²)
+    sigma_vm: FloatArray  # máx(σ_vM,flex, σ_vM,corte): tensión equivalente gobernante
+
+
+def member_stresses(section: Section, mr: MemberResult) -> MemberStresses:
+    """σ normales, τ de corte y von Mises en cada estación de la barra (ver docstring del módulo).
+
+    Usa σ_top / σ_bot del solver (convención AGENTS.md §4, exactas con c_top ≠ c_bot).
+    """
+    sigma_max = mr.sigma_abs
+    sigma_axial = mr.N / section.A
+    tau = shear_stress(section, mr.V)
+    vm_shear = von_mises(sigma_axial, tau)
+    return MemberStresses(
+        member=mr.member, x=mr.x, sigma_top=mr.sigma_top, sigma_bot=mr.sigma_bot,
+        sigma_max=sigma_max, sigma_axial=sigma_axial, tau=tau,
+        sigma_vm_flex=sigma_max, sigma_vm_shear=vm_shear, sigma_vm=np.maximum(sigma_max, vm_shear),
+    )
+
+
 class Status(str, Enum):
     OK = "OK"  # resistencia y servicio verifican
     ALERT = "ALERTA"  # 1 <= FS < FS_min, o flecha mayor a la admisible (sin fluencia)
@@ -60,24 +138,40 @@ class Status(str, Enum):
 class SafetyCheck:
     fs: float  # factor de seguridad mínimo de la estructura
     fs_min: float  # FS admisible requerido
-    sigma_max: float  # |σ| máxima [MPa]
+    sigma_max: float  # |σ| normal máxima de la barra crítica (fibra extrema) [MPa]
     sy: float  # fluencia del material crítico [MPa]
     member: int  # barra crítica
     x: float  # posición local en la barra crítica [mm]
     point: tuple[float, float]  # posición global [mm]
     status: Status  # veredicto global (resistencia + servicio)
-    utilization: float  # σ_max / (Sy / FS_min), >1 no verifica
+    utilization: float  # σ_vM / (Sy / FS_min), >1 no verifica (σ_vM = σ_max en flexión dominante)
     # ---- Servicio (ELS) — campos agregados al final (AGENTS.md §5) ---- #
     delta_max: float = 0.0  # |δ| máxima de la estructura [mm]
     deflection_ratio: float = math.inf  # N = L / δ_max (flecha relativa L/N)
     deflection_limit_ratio: float = DEFLECTION_LIMIT_DEFAULT  # N admisible; 0 = sin límite
     deflection_ok: bool = True  # N >= N admisible  (δ_max <= L / N_adm)
     reference_length: float = 0.0  # L usada para L/δ [mm]
+    # ---- Corte y von Mises — agregados al final (AGENTS.md §5) ---- #
+    tau_max: float = 0.0  # τ máxima de la barra crítica = |V|·Q/(I·t) [MPa]
+    sigma_vm_max: float = 0.0  # σ_vM máxima de la barra crítica [MPa]; FS = Sy / σ_vM
 
     @property
     def ok(self) -> bool:
         """Verifica resistencia y servicio."""
         return self.status is Status.OK
+
+    @property
+    def shear_governs(self) -> bool:
+        """El von Mises del eje neutro (corte) supera a la tensión normal de la fibra extrema."""
+        return self.sigma_vm_max > self.sigma_max * (1.0 + _SHEAR_GOVERNS_RTOL)
+
+    def _stress_text(self, sub: str = "") -> str:
+        """'σ máx = … MPa' (flexión) o 'σvM = … MPa (corte, τ máx = … MPa)' si gobierna el corte."""
+        if self.shear_governs:
+            vm = f"σvM,{sub}" if sub else "σvM"
+            return (f"{vm} = {self.sigma_vm_max:.1f} MPa (corte en el eje neutro, "
+                    f"τ{sub} máx = {self.tau_max:.1f} MPa)")
+        return f"σ{sub} máx = {self.sigma_max:.1f} MPa" if not sub else f"σ{sub} = {self.sigma_max:.1f} MPa"
 
     @property
     def strength_ok(self) -> bool:
@@ -97,11 +191,11 @@ class SafetyCheck:
         out: list[str] = []
         where = _where(self.member, self.point)
         if self.fs < 1.0:
-            out.append(f"Fluencia: σ máx = {self.sigma_max:.1f} MPa supera Sy = {self.sy:g} MPa "
+            out.append(f"Fluencia: {self._stress_text()} supera Sy = {self.sy:g} MPa "
                        f"en {where}.")
         elif not self.strength_ok:
             out.append(f"Resistencia: FS = {self.fs:.2f} < FS mín. = {self.fs_min:g} "
-                       f"(σ máx = {self.sigma_max:.1f} MPa en {where}).")
+                       f"({self._stress_text()} en {where}).")
         if not self.deflection_ok:
             out.append(f"Servicio: flecha δ máx = {self.delta_max:.1f} mm supera δ adm = "
                        f"L/{self.deflection_limit_ratio:g} = {self.delta_adm:.1f} mm "
@@ -126,7 +220,11 @@ def check_safety(
     deflection_limit_ratio: float = DEFLECTION_LIMIT_DEFAULT,
     reference_length: float | None = None,
 ) -> SafetyCheck:
-    """Verificación de resistencia (FS = Sy / σ_max) y de servicio (L/δ_max ≥ N).
+    """Verificación de resistencia (FS = Sy / σ_vM) y de servicio (L/δ_max ≥ N).
+
+    σ_vM = máx(σ_max, √((N/A)² + 3τ²)) en cada estación (`member_stresses`); con flexión dominante
+    σ_vM = σ_max y FS = Sy / σ_max como siempre. La barra crítica es la de menor FS; `sigma_max`,
+    `tau_max` y `sigma_vm_max` son los máximos de esa barra y la ubicación es la de σ_vM máxima.
 
     Args:
         fs_min: factor de seguridad mínimo admisible.
@@ -146,18 +244,22 @@ def check_safety(
     if L_ref <= 0.0:
         raise ValueError("La longitud de referencia para la flecha debe ser positiva [mm].")
 
-    best: tuple[float, float, float, MemberResult, int] | None = None  # (fs, σ, Sy, barra, estación)
+    # (fs, tensiones, Sy, barra, estación de σ_vM máx)
+    best: tuple[float, MemberStresses, float, MemberResult, int] | None = None
     for mr in results.members:
-        sy = model.members[mr.member].material.Sy
-        sig = mr.sigma_abs
-        k = int(np.argmax(sig))
-        smax = float(sig[k])
-        fs = sy / smax if smax > 1e-12 else math.inf
+        member = model.members[mr.member]
+        sy = member.material.Sy
+        st = member_stresses(member.section, mr)
+        k = int(np.argmax(st.sigma_vm))  # flexión dominante: misma estación que argmax(σ_max)
+        svm = float(st.sigma_vm[k])
+        fs = sy / svm if svm > 1e-12 else math.inf
         if best is None or fs < best[0]:
-            best = (fs, smax, sy, mr, k)
+            best = (fs, st, sy, mr, k)
     if best is None:
         raise ValueError("Resultados sin barras.")
-    fs, smax, sy, mr, k = best
+    fs, st, sy, mr, k = best
+    smax = float(np.max(st.sigma_max))
+    svm = float(st.sigma_vm[k])
 
     delta = abs(results.extreme("deflection").value)
     ratio = L_ref / delta if delta > 1e-12 else math.inf
@@ -173,9 +275,10 @@ def check_safety(
     return SafetyCheck(
         fs=fs, fs_min=fs_min, sigma_max=smax, sy=sy, member=mr.member,
         x=float(mr.x[k]), point=(float(mr.points[k, 0]), float(mr.points[k, 1])),
-        status=status, utilization=smax * fs_min / sy,
+        status=status, utilization=svm * fs_min / sy,
         delta_max=delta, deflection_ratio=ratio, deflection_limit_ratio=deflection_limit_ratio,
         deflection_ok=deflection_ok, reference_length=L_ref,
+        tau_max=float(np.max(st.tau)), sigma_vm_max=svm,
     )
 
 
@@ -210,6 +313,16 @@ class CombinationCheck:
     @property
     def strength_ok(self) -> bool:
         return self.strength.strength_ok
+
+    @property
+    def tau_max(self) -> float:
+        """τ máxima [MPa] en la barra crítica de la combinación gobernante (cargas mayoradas)."""
+        return self.strength.tau_max
+
+    @property
+    def sigma_vm_max(self) -> float:
+        """σ_vM máxima [MPa] de la combinación gobernante; ELU verifica si σ_vM ≤ φ·Sy."""
+        return self.strength.sigma_vm_max
 
     @property
     def delta_max(self) -> float:
@@ -258,10 +371,10 @@ class CombinationCheck:
         st, name = self.strength, self.governing.name
         where = _where(st.member, st.point)
         if st.fs < 1.0:
-            out.append(f"ELU {name}: σu = {st.sigma_max:.1f} MPa supera Sy = {st.sy:g} MPa "
+            out.append(f"ELU {name}: {st._stress_text('u')} supera Sy = {st.sy:g} MPa "
                        f"(fluencia) en {where}.")
         elif not st.strength_ok:
-            out.append(f"ELU {name}: σu = {st.sigma_max:.1f} MPa > φ·Sy = {self.phi:g}·{st.sy:g} = "
+            out.append(f"ELU {name}: {st._stress_text('u')} > φ·Sy = {self.phi:g}·{st.sy:g} = "
                        f"{self.phi * st.sy:.1f} MPa (utilización {st.utilization:.0%}) en {where}.")
         sv = self.service_check
         if not sv.deflection_ok:
