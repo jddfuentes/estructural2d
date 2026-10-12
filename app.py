@@ -8,14 +8,13 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from core.design import Suggestion, suggest_section
-from core.materials import Section, family_warnings
+from core.materials import family_warnings
 from core.model import COMB_SERVICE_D_L, LoadCase, Model, SupportType
 from core.reports import build_pdf_report
 from core.solver import Results, StructuralError, solve_load_cases
@@ -92,21 +91,31 @@ def _png(key: str, _fig: go.Figure) -> bytes | None:
         return None
 
 
+def _pdf_key(model_key: str, inp: AppInputs) -> str:
+    """Clave del PDF: TODO lo que cambia `_chk` además del modelo (L/N, escala y estabilidad, K, Lb)."""
+    return (f"{model_key}|{inp.deflection_limit_ratio}|{inp.deformed_scale}|stab={inp.stability}|"
+            f"K={inp.effective_length_factor_k}|Lb={inp.unbraced_length_mm}")
+
+
 @st.cache_data(show_spinner=False, max_entries=16)
 def _pdf(key: str, _model: Model, _chk: CombinationCheck, title: str, author: str,
          image: bytes | None) -> bytes:
+    """`_chk` no se hashea: `key` (= `_pdf_key`) debe cubrir todos los parámetros de la verificación."""
     return build_pdf_report(_model, _chk.governing_results, _chk, title, author,
                             reference_length=_chk.service_check.reference_length, image_bytes=image)
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
-def _suggestion(key: str, _build: Callable[[Section], Model], family: str,
-                deflection_limit_ratio: float, phi: float, stability: bool,
-                unbraced_length: float | None, effective_length_factor_k: float) -> Suggestion | None:
-    return suggest_section(_build, family, FS_MIN_DEFAULT,  # fs_min no se usa con φ
-                           deflection_limit_ratio=deflection_limit_ratio, phi=phi,
-                           stability=stability, unbraced_length=unbraced_length,
-                           effective_length_factor_k=effective_length_factor_k)
+def _suggestion(key: str, _inp: AppInputs, phi: float) -> Suggestion | None:
+    """Perfil más liviano de la familia, con la MISMA orientación (eje fuerte / débil, flip) que el
+    perfil elegido: cada candidato del catálogo se reorienta antes de armar el modelo."""
+    return suggest_section(
+        lambda s: _inp.builder(s.weak_axis(_inp.flip) if _inp.is_weak_axis else s),
+        _inp.family, FS_MIN_DEFAULT,  # fs_min no se usa con φ
+        deflection_limit_ratio=_inp.deflection_limit_ratio, phi=phi,
+        stability=_inp.stability, unbraced_length=_inp.unbraced_length_mm,
+        effective_length_factor_k=_inp.effective_length_factor_k,
+    )
 
 
 def reactions_table(model: Model, res: Results) -> pd.DataFrame:
@@ -157,10 +166,14 @@ def main() -> None:
     c2.metric("M máx", f"{abs(M.value) / 1e6:.2f} kN·m",
               help=f"Barra {M.member}, x global = {M.point[0] / 1e3:.2f} m")
     c3.metric("V máx", f"{abs(V.value) / 1e3:.2f} kN")
-    c5.metric("τ máx", f"{chk.tau_max:.1f} MPa",
-              help="Tensión tangencial máxima τ = |V|·Q/(I·t) en el eje neutro")
-    c6.metric("σᵥᴹ máx", f"{chk.sigma_vm_max:.1f} MPa",
-              help="Tensión equivalente de von Mises gobernante")
+    # Máximos de TODA la estructura en la combinación gobernante: misma magnitud que §3.2 y §4 del PDF
+    c5.metric("τ máx", f"{chk.tau_max_global:.1f} MPa",
+              help=f"Tensión tangencial máxima global τ = |V|·Q/(I·t) en el eje neutro (barra "
+                   f"{chk.tau_max_global_member}, {chk.governing.name}); en la barra crítica "
+                   f"(barra {strength.member}) τ = {chk.tau_max:.1f} MPa")
+    c6.metric("σᵥᴹ máx", f"{chk.sigma_vm_max_global:.1f} MPa",
+              help=f"Von Mises máxima global (barra {chk.sigma_vm_max_global_member}); en la barra crítica "
+                   f"(barra {strength.member}) σᵥᴹ = {chk.sigma_vm_max:.1f} MPa, la que se compara con φ·Sy")
     ratio = chk.service_check.deflection_ratio
     limit_help = (
         "sin límite de flecha"
@@ -170,11 +183,12 @@ def main() -> None:
     c4.metric("δ máx", f"{chk.delta_max:.2f} mm", help=f"Flecha ELS; {limit_help}",
               delta=f"L/{ratio:,.0f}" if ratio != float("inf") else None, delta_color="off")
     if inp.stability:
-        cs = chk.stability_governing[1].critical_stability
+        stab_comb, stab_chk = chk.stability_governing
+        cs = stab_chk.critical_stability
         if cs is not None:
             col = cs.column
             ltb = cs.ltb
-            st.subheader("Estabilidad de barras físicas")
+            st.subheader(f"Estabilidad de barras físicas (ELU {stab_comb.name})")
             s1, s2, s3, s4, s5 = st.columns(5)
             s1.metric("λ = KL/r", f"{col.slenderness:.0f}",
                       delta=f"límite E2 {SLENDERNESS_MAX:g}", delta_color="off",
@@ -187,7 +201,8 @@ def main() -> None:
             s5.metric("H1", f"{cs.utilization:.0%}",
                       help=f"{cs.mode}; M/(φMn) = {ltb.utilization:.0%}")
             if not chk.stability_ok:
-                st.error("ALERTA: Falla por pandeo flexional / PLT. Revisá K, Lb o la sección.")
+                st.error(f"NO VERIFICA: pandeo flexional / PLT en {stab_comb.name}. "
+                         "Revisá K, Lb o la sección.")
 
     if strength.shear_governs:
         st.warning("El factor de seguridad está gobernado por corte en el eje neutro "
@@ -210,7 +225,7 @@ def main() -> None:
         img_bytes = _png(fig_key, fig_deformed)
         if img_bytes is None:
             st.caption("Nota: gráfico no incrustado en el PDF (kaleido no disponible).")
-        pdf = _pdf(fig_key, model, chk, report_title, author, img_bytes)
+        pdf = _pdf(_pdf_key(key, inp), model, chk, report_title, author, img_bytes)
         st.download_button("Descargar memoria", data=pdf, file_name=_pdf_filename(report_title),
                            mime="application/pdf")
 
@@ -278,21 +293,22 @@ def _design_tab(inp: AppInputs, chk: CombinationCheck) -> None:
                 if inp.deflection_limit_ratio else "") + ":")
     # Mismo criterio que el veredicto superior: verificación completa por combinaciones
     sug = _suggestion(
-        f"{repr(inp.model())}|{inp.family}|{inp.stability}|{inp.unbraced_length_mm}|"
+        f"{repr(inp.model())}|{inp.family}|weak={inp.is_weak_axis}|flip={inp.flip}|"
+        f"{inp.deflection_limit_ratio}|{inp.stability}|{inp.unbraced_length_mm}|"
         f"{inp.effective_length_factor_k}",
-        inp.builder, inp.family, inp.deflection_limit_ratio, chk.phi, inp.stability,
-        inp.unbraced_length_mm, inp.effective_length_factor_k,
+        inp, chk.phi,
     )
     if sug is None:
         st.error("Ningún perfil de la familia verifica. Probá otra familia o reducí la luz/cargas.")
         return
-    s = sug.section
+    # `sug.section` es el perfil de catálogo; se muestra con la orientación con la que se verificó
+    s = sug.section.weak_axis(inp.flip) if inp.is_weak_axis else sug.section
     util = sug.combination.utilization if sug.combination is not None else sug.check.utilization
     c2.metric(s.name, f"{s.linear_mass(inp.material.rho):.1f} kg/m", delta=f"ELU {util:.0%}",
               delta_color="off")
     for warning in family_warnings(s.family):
         st.warning(warning)
-    if s.name == inp.section.name:
+    if s.base_name == inp.section.base_name:  # mismo perfil de catálogo (ignora "(eje débil)")
         st.success("El perfil seleccionado ya es el más liviano que verifica.")
     elif s.A < inp.section.A:
         saving = 1 - s.A / inp.section.A

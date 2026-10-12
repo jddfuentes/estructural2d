@@ -66,6 +66,9 @@ class AppInputs:
     stability: bool = False
     effective_length_factor_k: float = 1.0
     unbraced_length_mm: float | None = None
+    # Orientación de `section` (la de la viga): la búsqueda de perfil la reaplica a cada candidato
+    is_weak_axis: bool = False
+    flip: bool = False  # eje débil invertido (`Section.weak_axis(flip=True)`: puntas arriba en canales)
 
     def model(self) -> Model:
         return self.builder(self.section)
@@ -74,7 +77,13 @@ class AppInputs:
 # --------------------------------------------------------------------------- #
 
 
-def _section_picker(label: str, key: str, material: Material) -> tuple[Section, str]:
+ORIENT_STRONG = "Eje fuerte (por defecto)"
+ORIENT_WEAK = "Eje débil"
+ORIENT_WEAK_FLIP = "Eje débil (invertido)"
+
+
+def _section_picker(label: str, key: str, material: Material) -> tuple[Section, str, bool, bool]:
+    """Familia, perfil y orientación. Devuelve (sección orientada, familia, eje débil, invertido)."""
     families = [*SECTIONS.keys(), "Personalizado"]
     fam = st.selectbox(f"{label}: familia", families, index=families.index(DEFAULT_SECTION[0]),
                        key=f"{key}_fam")
@@ -90,23 +99,27 @@ def _section_picker(label: str, key: str, material: Material) -> tuple[Section, 
         h = st.number_input("Altura h [mm]", min_value=1.0, value=200.0, key=f"{key}_h")
         sec = custom("Personalizado", A=A_cm2 * 100, I=I_cm4 * 1e4, c=h / 2)
         st.caption("Eje fuerte · sección personalizada sin propiedades de eje débil ni corte.")
-        return sec, fam
+        return sec, fam, False, False
     names = list(SECTIONS[fam].keys())
     default = names.index(DEFAULT_SECTION[1]) if DEFAULT_SECTION[1] in names else len(names) // 2
     name = st.selectbox(f"{label}: perfil", names, index=default, key=f"{key}_name")
     sec = SECTIONS[fam][name]
-    orientations = ["Eje fuerte (por defecto)"]
+    orientations = [ORIENT_STRONG]
     if sec.Iy > 0.0 and sec.c_y1 > 0.0 and sec.c_y2 > 0.0:
-        orientations.append("Eje débil")
+        orientations.append(ORIENT_WEAK)
+        if abs(sec.c_y1 - sec.c_y2) > 1e-9:  # canales: dorso arriba / puntas arriba
+            orientations.append(ORIENT_WEAK_FLIP)
     orientation = st.selectbox("Orientación del perfil", orientations, key=f"{key}_orientation")
-    if orientation == "Eje débil":
-        sec = sec.weak_axis()
+    weak, flip = orientation != ORIENT_STRONG, orientation == ORIENT_WEAK_FLIP
+    if weak:
+        sec = sec.weak_axis(flip)
     shear = (f" · Q = {sec.Q_max / 1e3:,.1f} cm³ · tᵥ = {sec.t_web:g} mm"
              if sec.has_shear_data else " · sin datos de corte")
+    fibers = f" · c_sup = {sec.c_top:g} mm · c_inf = {sec.c_bot:g} mm" if weak else ""
     st.caption(f"{sec.name} · A = {sec.A / 100:.2f} cm² · I = {sec.I / 1e4:,.0f} cm⁴ · "
-               f"W = {sec.W / 1e3:,.1f} cm³{shear} · {sec.linear_mass(material.rho):.1f} kg/m "
+               f"W = {sec.W / 1e3:,.1f} cm³{shear}{fibers} · {sec.linear_mass(material.rho):.1f} kg/m "
                f"({material.name})")
-    return sec, fam
+    return sec, fam, weak, flip
 
 
 def _editor(df: pd.DataFrame, key: str, column_config: dict[str, Any],
@@ -229,15 +242,16 @@ def _generic_frame_inputs(
 ) -> tuple[Callable[[Section], Model], float]:
     """Editor mínimo de nodos, barras, apoyos y cargas para una topología libre."""
     st.markdown("**Nodos**")
-    nodes_df = _editor(
-        pd.DataFrame({"Nodo": [0, 1, 2, 3], "x [m]": [0.0, 0.0, 8.0, 8.0],
-                      "y [m]": [0.0, 4.0, 4.0, 0.0]}),
-        "generic_nodes",
-        {"Nodo": st.column_config.NumberColumn(disabled=True),
-         "x [m]": st.column_config.NumberColumn(step=0.1),
-         "y [m]": st.column_config.NumberColumn(step=0.1)},
-        num_rows="dynamic",
-    )
+    st.caption("El número de nodo es su posición en la tabla (0, 1, 2, …). Al borrar una fila los nodos "
+               "siguientes se renumeran: revisá barras, apoyos y cargas.")
+    nodes_df = _node_table(st.data_editor(
+        pd.DataFrame({"x [m]": [0.0, 0.0, 8.0, 8.0], "y [m]": [0.0, 4.0, 4.0, 0.0]}),
+        key="generic_nodes", num_rows="dynamic", hide_index=True, width="stretch",
+        column_config={"x [m]": st.column_config.NumberColumn(step=0.1),
+                       "y [m]": st.column_config.NumberColumn(step=0.1)},
+    ))
+    st.caption("Nodos: " + " · ".join(
+        f"{k} ({_fmt_coord(r['x [m]'])}; {_fmt_coord(r['y [m]'])})" for k, r in nodes_df.iterrows()))
     st.markdown("**Barras**")
     members_df = _editor(
         pd.DataFrame({"i": [0, 1, 2], "j": [1, 2, 3], "Rótula inicio": [False] * 3,
@@ -267,9 +281,14 @@ def _generic_frame_inputs(
     )
     thermal_df = _thermal_editor([f"Barra {i}" for i in range(len(members_df))],
                                  "generic_thermal_loads")
-    span = max(float(nodes_df["x [m]"].max()) - float(nodes_df["x [m]"].min()), 0.1) * M
+    xs = nodes_df["x [m]"].dropna()
+    span = max(float(xs.max()) - float(xs.min()), 0.1) * M if len(xs) else 0.1 * M
 
     def builder(sec: Section) -> Model:
+        missing = [k for k, r in nodes_df.iterrows() if pd.isna(r["x [m]"]) or pd.isna(r["y [m]"])]
+        if missing:
+            raise ValueError(f"Nodo(s) {', '.join(str(k) for k in missing)} sin coordenadas: completá x e y "
+                             "o borrá la fila (el número de nodo es la posición en la tabla).")
         points = [(float(r["x [m]"]) * M, float(r["y [m]"]) * M)
                   for _, r in nodes_df.iterrows()]
         members = [
@@ -292,6 +311,25 @@ def _generic_frame_inputs(
     return builder, span
 
 
+def _node_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Tabla de nodos con numeración correlativa por posición (índice 0..n−1 = número de nodo).
+
+    No usa `dropna`: descartar una fila intermedia desplazaría los números de los nodos siguientes y
+    las barras quedarían conectadas a otros nodos. Sólo se ignoran las filas vacías del FINAL (una fila
+    recién agregada y todavía sin datos); una fila incompleta intermedia se informa al armar el modelo.
+    """
+    out = df.loc[:, ["x [m]", "y [m]"]].reset_index(drop=True)
+    empty = out.isna().all(axis=1).to_numpy()
+    n = len(out)
+    while n > 0 and empty[n - 1]:
+        n -= 1
+    return out.iloc[:n].reset_index(drop=True)
+
+
+def _fmt_coord(value: Any) -> str:
+    return "?" if pd.isna(value) else f"{float(value):g}"
+
+
 def sidebar() -> AppInputs:
     sb = st.sidebar
     with sb:
@@ -302,7 +340,7 @@ def sidebar() -> AppInputs:
         mat_names = list(MATERIALS)
         material = MATERIALS[st.selectbox("Material", mat_names, index=mat_names.index(DEFAULT_MATERIAL))]
         st.caption(f"E = {material.E:,.0f} MPa · Sy = {material.Sy:g} MPa · Su = {material.Su:g} MPa")
-        section, family = _section_picker("Viga", "beam", material)
+        section, family, is_weak_axis, flip = _section_picker("Viga", "beam", material)
         column_section = None if kind == "Viga" else _section_picker("Columnas", "col", material)[0]
         self_weight = st.checkbox("Incluir peso propio", value=True)
 
@@ -343,7 +381,8 @@ def sidebar() -> AppInputs:
                      deformed_scale=scale, builder=builder, span_mm=span,
                      deflection_limit_ratio=deflection_limit_ratio, stability=stability,
                      effective_length_factor_k=effective_length_factor_k,
-                     unbraced_length_mm=(lb_m * M if stability and lb_m > 0.0 else None))
+                     unbraced_length_mm=(lb_m * M if stability and lb_m > 0.0 else None),
+                     is_weak_axis=is_weak_axis, flip=flip)
 
 
 def _beam_inputs(material: Material, self_weight: bool) -> tuple[Callable[[Section], Model], float]:
