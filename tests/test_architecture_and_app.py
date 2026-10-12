@@ -266,3 +266,198 @@ def test_app_portal_free_bases_with_springs_reactions():
     assert tables and set(tables[0]["Tipo"]) == {"elástico"}
     # La tabla es de la combinación ELU gobernante: sin cargas L gobierna 1.4D ⇒ ΣRx = −1.4·H = −14 kN
     assert abs(tables[0]["Rx [kN]"].sum() + 1.4 * 10.0) < 1e-6
+
+
+# --------------------------------------------------------------------------- #
+# Auditoría pre-release v0.1.0: B1 (eje débil en la sugerencia), B3 (caché del PDF), B5 (pórtico genérico)
+# --------------------------------------------------------------------------- #
+
+
+def _patched_app_script(root, overrides):
+    """Corre app.py con datos iniciales propios en algunos `st.data_editor` (por clave) y guarda en
+    `st.session_state["_downloads"][rótulo]` los bytes de cada `st.download_button`.
+
+    AppTest no puede editar un `data_editor` ni leer el archivo de un `download_button`: se envuelven
+    ambas funciones sólo durante esta corrida (se restauran en `finally`, así no afectan a otros AppTest
+    del mismo proceso).
+    """
+    import runpy
+    import sys
+
+    import pandas as pd
+    import streamlit as st
+
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    original, original_download = st.data_editor, st.download_button
+
+    def data_editor(data, *args, key=None, **kwargs):
+        if key in overrides:
+            data = pd.DataFrame(overrides[key])
+        return original(data, *args, key=key, **kwargs)
+
+    def download_button(label, data, *args, **kwargs):
+        st.session_state.setdefault("_downloads", {})[label] = data
+        return original_download(label, data, *args, **kwargs)
+
+    st.data_editor, st.download_button = data_editor, download_button
+    try:
+        runpy.run_path(f"{root}/app.py", run_name="__main__")
+    finally:
+        st.data_editor, st.download_button = original, original_download
+
+
+def _app_with_tables(overrides):
+    from streamlit.testing.v1 import AppTest
+
+    return AppTest.from_function(_patched_app_script, args=(str(ROOT), overrides), default_timeout=60)
+
+
+def test_app_weak_axis_suggestion_keeps_orientation():
+    """B1: viga simple 4 m, q = 3 kN/m (D) + peso propio, IPE 200 en eje débil → FLUENCIA (141 %).
+
+    La búsqueda debe recorrer el catálogo EN EJE DÉBIL: σ_u = M_u·c/I_y con M_u = 1,4·(q + g)·L²/8 lleva a
+    IPE 270 (antes sugería IPE 140, calculado en eje fuerte, que en eje débil da 316 %).
+    """
+    pytest.importorskip("streamlit")
+    from core.builders import BeamDistLoad, BeamSupport, build_beam
+    from core.design import suggest_section
+    from core.materials import DEFAULT_MATERIAL, MATERIALS, get_section
+    from core.model import SupportType
+    from core.verification import check_combinations
+
+    span, q = 4000.0, -3.0
+
+    def build(sec):
+        return build_beam(span, [BeamSupport(0.0, SupportType.PINNED), BeamSupport(span, SupportType.ROLLER)],
+                          sec, MATERIALS[DEFAULT_MATERIAL], [], [BeamDistLoad(0.0, span, q, q)],
+                          self_weight=True)
+
+    ref = suggest_section(lambda s: build(s.weak_axis()), "IPE", 1.5, phi=0.9)
+    assert ref is not None and ref.section.name == "IPE 270"
+    assert not check_combinations(build(get_section("IPE 140").weak_axis())).strength_ok
+
+    at = _app_with_tables({
+        "point_loads": {"x [m]": [], "P [kN] ↓": [], "M [kN·m] ↺": [], "Hipótesis": []},
+        "dist_loads": {"x ini [m]": [0.0], "x fin [m]": [4.0], "q ini [kN/m] ↓": [3.0],
+                       "q fin [kN/m] ↓": [3.0], "Hipótesis": ["D"]},
+    }).run()
+    at.sidebar.number_input[0].set_value(4.0)
+    at.sidebar.selectbox(key="beam_orientation").set_value("Eje débil")
+    at.run()
+
+    assert not at.exception, [e.message for e in at.exception]
+    badge = next(md.value for md in at.markdown if "border-left:6px" in md.value)
+    assert ">FLUENCIA<" in badge and "ELU 141%" in badge
+    labels = [m.label for m in at.metric]
+    assert "IPE 270 (eje débil)" in labels and "IPE 140" not in labels
+    expected = "IPE 200 (eje débil) no alcanza: subir a **IPE 270 (eje débil)**."
+    assert any(w.value == expected for w in at.warning)
+
+
+def test_app_weak_axis_current_profile_compared_by_base_name():
+    """B1: si el perfil elegido en eje débil ya es el más liviano que verifica, se reconoce aunque su nombre
+    lleve el sufijo "(eje débil)" (comparación por nombre base de catálogo)."""
+    pytest.importorskip("streamlit")
+    at = _app_with_tables({
+        "point_loads": {"x [m]": [], "P [kN] ↓": [], "M [kN·m] ↺": [], "Hipótesis": []},
+        "dist_loads": {"x ini [m]": [0.0], "x fin [m]": [4.0], "q ini [kN/m] ↓": [3.0],
+                       "q fin [kN/m] ↓": [3.0], "Hipótesis": ["D"]},
+    }).run()
+    at.sidebar.number_input[0].set_value(4.0)
+    at.sidebar.selectbox(key="beam_name").set_value("IPE 270")
+    at.sidebar.selectbox(key="beam_orientation").set_value("Eje débil")
+    at.run()
+
+    assert not at.exception, [e.message for e in at.exception]
+    assert any("ya es el más liviano" in s.value for s in at.success)
+
+
+def test_app_pdf_cache_key_includes_stability_k_and_lb():
+    """B3: activar la estabilidad o cambiar K / Lb cambia la memoria: el PDF no puede salir de la caché del
+    modelo anterior (antes la clave era modelo | L/N | escala y devolvía el PDF sin §4 de estabilidad)."""
+    pytest.importorskip("streamlit")
+    pypdf = pytest.importorskip("pypdf")
+    import hashlib
+    import io
+
+    def report(at):
+        assert not at.exception, [e.message for e in at.exception]
+        pdf = at.session_state["_downloads"]["Descargar memoria"]
+        text = " ".join(" ".join(p.extract_text() for p in pypdf.PdfReader(io.BytesIO(pdf)).pages).split())
+        return hashlib.sha256(pdf).hexdigest(), text
+
+    at = _app_with_tables({}).run()
+    h_off, pdf_off = report(at)
+    markers = ("Estabilidad: pandeo flexional según", "Resistencia de diseño a compresión")  # §1 y §4
+    assert not any(mk in pdf_off for mk in markers)
+
+    next(c for c in at.sidebar.checkbox if c.label.startswith("Verificar estabilidad")).check().run()
+    h_on, pdf_on = report(at)
+    assert h_on != h_off
+    assert all(mk in pdf_on for mk in markers) and "K = 1," in pdf_on
+
+    k_input = next(n for n in at.sidebar.number_input if n.label == "Factor de longitud efectiva K")
+    k_input.set_value(2.0).run()
+    h_k, pdf_k = report(at)
+    assert h_k != h_on and "K = 2," in pdf_k
+
+    next(n for n in at.sidebar.number_input if n.label.startswith("Lb no arriostrada")).set_value(1.5).run()
+    h_lb, pdf_lb = report(at)
+    assert h_lb != h_k and "Lb = 1.500 m" in pdf_lb
+
+
+_GENERIC_FRAME = {
+    # Pórtico a dos aguas de 5 nodos + una fila recién agregada y vacía (como la deja el editor dinámico)
+    "generic_nodes": {"x [m]": [0.0, 0.0, 4.0, 8.0, 8.0, None], "y [m]": [0.0, 4.0, 5.5, 4.0, 0.0, None]},
+    "generic_members": {"i": [0, 1, 2, 3], "j": [1, 2, 3, 4], "Rótula inicio": [False] * 4,
+                        "Rótula fin": [False] * 4},
+    "generic_supports": {"Nodo": [0, 4], "Tipo": ["empotrado", "empotrado"]},  # SupportType.FIXED.value
+    "generic_nodal_loads": {"Nodo": [2], "Fx [kN]": [5.0], "Fy [kN] ↓": [20.0], "Mz [kN·m]": [0.0],
+                            "Hipótesis": ["D"]},
+}
+
+
+def test_app_generic_frame_more_than_four_nodes():
+    """B5: el editor de nodos del pórtico genérico acepta más de 4 nodos; el número de nodo es la posición
+    en la tabla (sin columna "Nodo" que `dropna` descarte) y la fila vacía final se ignora."""
+    pytest.importorskip("streamlit")
+    at = _app_with_tables(_GENERIC_FRAME).run()
+    at.sidebar.radio[0].set_value("Pórtico genérico").run()
+
+    assert not at.exception, [e.message for e in at.exception]
+    assert not at.error, [e.value for e in at.error]
+    assert any(c.value == "Nodos: 0 (0; 0) · 1 (0; 4) · 2 (4; 5.5) · 3 (8; 4) · 4 (8; 0)"
+               for c in at.sidebar.caption)
+    reactions = next(d.value for d in at.dataframe if "Rx [kN]" in d.value.columns)
+    assert list(reactions["Nodo"]) == [0, 4]
+    assert list(reactions["x [m]"]) == [0.0, 8.0]
+    # Equilibrio de la combinación gobernante (sólo D): ΣRx = −1,4·Fx
+    assert abs(reactions["Rx [kN]"].sum() + 1.4 * 5.0) < 1e-6
+
+
+def test_app_generic_frame_incomplete_middle_node_is_reported():
+    """B5: una fila intermedia sin coordenadas NO se descarta (renumeraría los nodos siguientes y las barras
+    quedarían conectadas a otros nodos): se informa con el número de nodo."""
+    pytest.importorskip("streamlit")
+    tables = dict(_GENERIC_FRAME)
+    tables["generic_nodes"] = {"x [m]": [0.0, 0.0, None, 8.0, 8.0], "y [m]": [0.0, 4.0, None, 4.0, 0.0]}
+    at = _app_with_tables(tables).run()
+    at.sidebar.radio[0].set_value("Pórtico genérico").run()
+
+    assert not at.exception, [e.message for e in at.exception]
+    assert any("Nodo(s) 2 sin coordenadas" in e.value for e in at.error)
+
+
+def test_node_table_numbering_by_position():
+    """B5: `_node_table` numera por posición; ignora sólo filas vacías del final, conserva las intermedias."""
+    pytest.importorskip("streamlit")
+    import pandas as pd
+
+    from ui.inputs import _node_table
+
+    df = pd.DataFrame({"x [m]": [0.0, None, 8.0, None, None], "y [m]": [0.0, None, 4.0, None, None]},
+                      index=[0, 1, 3, 7, 8])  # índices con huecos, como tras borrar filas
+    out = _node_table(df)
+    assert list(out.index) == [0, 1, 2]
+    assert out["x [m]"].iloc[2] == 8.0 and pd.isna(out["x [m]"].iloc[1])

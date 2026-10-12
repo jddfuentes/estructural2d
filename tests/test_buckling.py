@@ -17,7 +17,7 @@ import pytest
 
 from core.builders import BeamDistLoad, BeamPointLoad, BeamSupport, build_beam, build_portal_frame
 from core.materials import MATERIALS, custom, get_section, rhs, solid_rect, solid_round
-from core.model import Member, Model, NodalLoad, Support
+from core.model import LoadCase, Member, Model, NodalLoad, Support
 from core.model import SupportType as ST
 from core.reports import build_pdf_report
 from core.solver import solve
@@ -340,6 +340,52 @@ def test_combinations_stability_no_verifica():
     assert chk.governing.name == chk.stability_governing[0].name == "1.4D"
     assert chk.verdict == (Status.FAIL, "NO VERIFICA")
     assert any(i.startswith("ELU 1.4D: Estabilidad") and "φ·Pn" in i for i in chk.issues)
+
+
+def test_combinations_yield_not_hidden_by_stability_governing_t4b():
+    """Auditoría v0.1.0, B2 (caso T4b). Ménsula vertical IPE 200, L = 4 m, K = 2, D = 225 kN axial y
+    L = 5 kN lateral en la punta.
+
+    Resistencia, en el empotramiento: σ_u = N_u/A + M_u·c/I con N_u = γD·D y M_u = γL·H·L.
+      1.4D:        σ_u = 1,4·225 000/2850 = 110,5 MPa  → 49 % de φ·Sy.
+      1.2D + 1.6L: σ_u = 270 000/2850 + 1,6·5000·4000·100/1943·10⁴ = 94,7 + 164,7 = 259,4 MPa > Sy = 250
+                   → FS = 0,96: FLUENCIA.
+    Estabilidad (KL/r = 8000/22,35 = 358, elástico): la H1 máxima es la de 1.4D (Pu mayor). La envolvente
+    de tensiones (`governing`) y la combinación crítica de pandeo (`stability_governing`) son distintas y
+    el veredicto debe ser FLUENCIA, no "NO VERIFICA".
+    """
+    s = get_section("IPE 200")
+    L, D, H = 4000.0, 225_000.0, 5000.0
+    m = Model(nodes=[(0.0, 0.0), (0.0, L)], members=[Member(0, 1, s, STEEL)],
+              supports=[Support(0, ST.FIXED)],
+              nodal_loads=[NodalLoad(1, Fy=-D), NodalLoad(1, Fx=H, case=LoadCase.LIVE)])
+    chk = check_combinations(m, stability=True, effective_length_factor_k=2.0)
+
+    sigma_u = 1.2 * D / s.A + 1.6 * H * L * s.c_top / s.I
+    assert sigma_u == pytest.approx(259.4, abs=0.05)
+    by_name = {comb.name: c for comb, c in chk.strength_checks}
+    assert by_name["1.2D + 1.6L"].sigma_max == pytest.approx(sigma_u, rel=1e-6)
+    fs_u = by_name["1.2D + 1.6L"].fs
+    assert fs_u == pytest.approx(FY / sigma_u, rel=1e-6) and fs_u < 1.0
+    assert by_name["1.4D"].sigma_max == pytest.approx(1.4 * D / s.A, rel=1e-6)
+
+    # Desacople de criterios: tensiones → 1.2D + 1.6L; estabilidad (H1) → 1.4D
+    assert chk.governing.name == "1.2D + 1.6L"
+    assert chk.utilization == pytest.approx(max(c.utilization for c in by_name.values()), rel=1e-12)
+    assert chk.utilization == pytest.approx(sigma_u / (0.9 * FY), rel=1e-6)
+    assert chk.stability_governing[0].name == "1.4D"
+    assert chk.stability_utilization == max(c.stability_utilization for c in by_name.values())
+    assert not chk.stability_ok and chk.stability_governs
+    assert chk.governing_results is chk.uls_results[1]
+
+    # Veredicto: fluencia en cualquier combinación ⇒ FLUENCIA (y status FAIL), aunque la H1 gobierne
+    assert chk.yield_failure and chk.strength_failure
+    assert chk.status is Status.FAIL
+    assert chk.verdict == (Status.FAIL, "FLUENCIA")
+    # issues: un mensaje por combinación y criterio
+    assert chk.issues[0].startswith("ELU 1.2D + 1.6L: σu = 259.4 MPa supera Sy = 250 MPa (fluencia)")
+    assert any(i.startswith("ELU 1.4D: Inestabilidad: pandeo flexional") for i in chk.issues)
+    assert not any(i.startswith("ELU 1.4D: σu") for i in chk.issues)  # 1.4D verifica por tensiones
 
 
 @pytest.mark.parametrize("kwargs", [{"fs_min": 0.9}, {"effective_length_factor_k": 0.0},

@@ -475,3 +475,52 @@ def test_report_free_support_with_springs():
     text = _flat(_text(build_pdf_report(m, r, check_safety(m, r), date=DATE)))
     assert "Elástico: Kx=20000 kN/m, Ky=500000 kN/m, Krz=30000 kN·m/rad" in text
     assert "Libre" not in text[:text.index("6. Glosario y simbología")]
+
+
+def test_tau_max_global_is_one_magnitude_in_check_and_report():
+    """Auditoría v0.1.0, B4: τ máx = máx_barras máx_x |V|·Q/(I·t) de la combinación ELU gobernante es UNA
+    magnitud (`CombinationCheck.tau_max_global`), la misma en el KPI de la app, §3.2 y §4 del PDF.
+
+    Pórtico por defecto de la app (IPE 200 en viga y columnas, bases empotradas, q = 12 kN/m y H = 10 kN
+    en D, peso propio): la barra crítica (menor FS, barra 2) no es la de τ máx (barra 1, columna
+    izquierda); antes la app mostraba τ = 34,8 MPa y §3.2 del PDF 72,1 MPa.
+    """
+    from core.verification import check_combinations, member_stresses, stress_maxima
+
+    s = get_section("IPE 200")
+    m = build_portal_frame(8000.0, 4000.0, s, s, MAT, ST.FIXED, ST.FIXED, beam_q=-12.0,
+                           lateral_load=10_000.0, self_weight=True)
+    chk = check_combinations(m)
+    res = chk.governing_results
+    per_member = {mr.member: member_stresses(m.members[mr.member].section, mr) for mr in res.members}
+    tau_ref = max(float(st.tau.max()) for st in per_member.values())
+    vm_ref = max(float(st.sigma_vm.max()) for st in per_member.values())
+
+    # Objeto de verificación: global y barra crítica expuestos por separado, y coherentes entre sí
+    assert chk.tau_max_global == pytest.approx(tau_ref, rel=1e-12)
+    assert chk.tau_max_global == chk.strength.tau_max_global
+    assert chk.sigma_vm_max_global == pytest.approx(vm_ref, rel=1e-12)
+    assert chk.tau_max_global_member == 1 and chk.strength.member == 2
+    assert chk.tau_max == pytest.approx(float(per_member[2].tau.max()), rel=1e-12)
+    assert chk.tau_max < chk.tau_max_global
+    assert stress_maxima(m, res).tau_max == chk.tau_max_global
+    assert chk.tau_max == pytest.approx(34.8, abs=0.05)
+    assert chk.tau_max_global == pytest.approx(72.1, abs=0.05)
+
+    text = _flat(_text(build_pdf_report(m, res, chk, date=DATE, include_figures=False)))
+    s32 = text[text.index("3.2 Solicitaciones máximas"):text.index("3.3 Deformación")]
+    s4 = text[text.index("4. Verificación de seguridad"):text.index("VEREDICTO")]
+    # §3.2 (3 decimales) y §4 (1 decimal) leen el mismo número, rotulado "global", con su barra
+    assert f"Tensión tangencial máxima global τmáx {chk.tau_max_global:,.3f} MPa 1" in s32
+    assert f"Tensión tangencial máxima global τmáx (barra 1) {chk.tau_max_global:,.1f} MPa" in s4
+    # la τ de la barra crítica sólo aparece rotulada como tal
+    assert f"Tensión tangencial en la barra crítica τ (barra 2) {chk.tau_max:,.1f} MPa" in s4
+    assert f"{chk.tau_max:,.3f}" not in s32
+
+    # Ruta sin combinaciones (SafetyCheck): §3.2 y §4 también coinciden
+    r = solve(m)
+    sc = check_safety(m, r)
+    text = _flat(_text(build_pdf_report(m, r, sc, date=DATE, include_figures=False)))
+    assert f"{sc.tau_max_global:,.3f} MPa {sc.tau_max_global_member}" in text
+    assert f"Tensión tangencial máxima global τmáx (barra {sc.tau_max_global_member}) " \
+           f"{sc.tau_max_global:,.1f} MPa" in text

@@ -221,14 +221,16 @@ def test_governing_uls_combination(q_D, q_L, governing, gammas):
 
 
 def test_uls_status_and_issue_text():
-    """σ_u > φ·Fy ⇒ ALERTA con la combinación nombrada; σ_u > Fy ⇒ FLUENCIA."""
+    """φ·Fy < σ_u ≤ Fy ⇒ NO VERIFICA (severidad FAIL: en LRFD no verificar ELU es falla, auditoría v0.1.0
+    B2) con la combinación nombrada; σ_u > Fy ⇒ FLUENCIA."""
     # σ_u(1.2D+1.6L) = (1.2·5 + 1.6·q_L)·L²/8·c/I; q_L tal que σ_u ≈ 0.95·Fy (> φ·Fy = 0.9·Fy)
     q_L = -((0.95 * SY * I / C * 8 / L**2) - 1.2 * 5.0) / 1.6
     chk = check_combinations(beam(q_D=-5.0, q_L=q_L), deflection_limit_ratio=0.0)
-    assert chk.status is Status.ALERT and not chk.strength_ok
+    assert chk.status is Status.FAIL and not chk.strength_ok
+    assert chk.verdict == (Status.FAIL, "NO VERIFICA") and not chk.yield_failure
     assert chk.issues and chk.issues[0].startswith("ELU 1.2D + 1.6L")
     chk_fail = check_combinations(beam(q_D=-5.0, q_L=2 * q_L), deflection_limit_ratio=0.0)
-    assert chk_fail.status is Status.FAIL
+    assert chk_fail.status is Status.FAIL and chk_fail.verdict == (Status.FAIL, "FLUENCIA")
 
 
 def test_check_combinations_rejects_bad_inputs():
