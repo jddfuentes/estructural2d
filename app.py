@@ -18,6 +18,7 @@ from core.materials import family_warnings
 from core.model import COMB_SERVICE_D_L, LoadCase, Model, SupportType
 from core.reports import build_pdf_report
 from core.solver import Results, StructuralError, solve_load_cases
+#from core.verification import FS_MIN_DEFAULT, SLENDERNESS_MAX, CombinationCheck, Status, check_combinations
 from core.verification import FS_MIN_DEFAULT, SLENDERNESS_MAX, CombinationCheck, Status, check_combinations
 from ui.inputs import AppInputs, sidebar
 from ui.plots import plot_diagram, plot_structure
