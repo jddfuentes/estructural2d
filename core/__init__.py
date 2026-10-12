@@ -15,6 +15,7 @@ from core.model import (
     Spring,
     Support,
     SupportType,
+    ThermalLoad,
 )
 from core.solver import Results, StructuralError, combine_results, solve, solve_combinations, solve_load_cases
 from core.verification import CombinationCheck, SafetyCheck, check_combinations, check_safety
@@ -38,6 +39,7 @@ __all__ = [
     "StructuralError",
     "Support",
     "SupportType",
+    "ThermalLoad",
     "check_combinations",
     "check_safety",
     "combine_results",
