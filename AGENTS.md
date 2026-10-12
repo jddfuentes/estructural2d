@@ -35,8 +35,8 @@ app.py            Orquestación Streamlit. NO calcula nada. Exporta PNG de Plotl
  ├── ui/plots.py    Model/Results -> go.Figure (sin Streamlit; reutilizable en reportes)
  └── core/          Motor puro. Sin Streamlit, sin Plotly, sin pandas, sin I/O.
       ├── materials.py     Material, Section, catálogo (IPE, IPN, UPN, W, C conformado, caños Sch40, tubos)
-      ├── model.py         Model, Member, Support, Spring, NodalLoad, DistributedLoad (dataclasses)
-      ├── builders.py      build_beam(), build_portal_frame(): definición "de ingeniero" -> Model
+      ├── model.py         Model, Member, Support, Spring, NodalLoad, DistributedLoad, ThermalLoad (dataclasses)
+      ├── builders.py      build_beam(), build_portal_frame(), build_frame() (topología libre) -> Model
       ├── solver.py        solve(model) -> Results  (función pura)
       ├── verification.py  check_safety() -> SafetyCheck (FS, estado OK/ALERTA/FLUENCIA)
       ├── design.py        suggest_section(): perfil más liviano que verifica
@@ -88,6 +88,7 @@ Notación: fluencia **S<sub>y</sub>** (`Sy`) en mensajes, PDF y glosario; `Fx`, 
 | Tensión, E | MPa (N/mm²) | MPa |
 | Área / Inercia / W | mm² / mm⁴ / mm³ | cm² / cm⁴ / cm³ |
 | Densidad | kg/m³ | kg/m³ |
+| Temperatura ΔT / dilatación α | °C / 1/°C | °C / 1/°C |
 | Rigidez de resorte kx, ky / krz | N/mm / N·mm/rad | kN/m (numéricamente igual) / kN·m/rad (×1e6) |
 
 - Ejes globales: X → derecha, Y ↑ arriba, Mz antihorario +.
@@ -121,6 +122,20 @@ Notación: fluencia **S<sub>y</sub>** (`Sy`) en mensajes, PDF y glosario; `Fx`, 
 - `SupportType.FREE` (`"libre"`) no restringe ningún GDL (`restrained_dofs = (False, False, False)`):
   sirve para que la UI declare un apoyo puramente elástico. No se dibuja símbolo rígido; libre sin
   resorte ⇒ mecanismo (`StructuralError`).
+- Cargas térmicas: `ThermalLoad(member, delta_t, case=LoadCase.DEAD, strain=0.0)` en `Model.thermal_loads`.
+  ΔT [°C] uniforme en la barra (> 0 dilata); `strain` [-] = deformación axial impuesta adicional (falta de
+  ajuste, > 0 alarga). Deformación libre ε₀ = `Material.alpha`·ΔT + strain (α por defecto 1,2·10⁻⁵ 1/°C).
+  Sin gradiente térmico (no hay curvatura impuesta). Formulación: fuerzas de empotramiento **sobre la barra**
+  (locales) f_emp = (+EAε₀, 0, 0, −EAε₀, 0, 0) (N₀ = −EAε₀, compresión si ε₀ > 0); las cargas nodales
+  equivalentes que se ensamblan son su opuesto, f_eq = (−EAε₀, 0, 0, +EAε₀, 0, 0) en ejes locales, rotadas
+  con Tᵀ. `MemberResult.N` ya es el axil real N = EA·(u_j − u_i)/L − EAε₀, y la elástica axial integra
+  u' = N/EA + ε₀: barra libre de alargarse ⇒ N = 0 y ΔL = ε₀·L; biempotrada ⇒ u = 0 y N = −EAε₀.
+  σ, σ_vM, ELU, combinaciones y H1 (estabilidad) toman ese N sin tratamiento aparte. Las rótulas no
+  modifican el término térmico (sólo condensan giros). Las cargas térmicas son autoequilibradas: ΣR = 0.
+- Pórticos genéricos: `build_frame(nodes, members, supports, ...)` acepta nodos (X, Y) explícitos, barras
+  i → j de cualquier orientación (con rótulas), vínculos y resortes en cualquier nodo. Rechaza
+  (`ValueError`) nodos coincidentes (< 1e-6 mm), nodos sin barras y dos barras sobre el mismo par de nodos.
+  No subdivide barras (el solver es exacto por barra): las cargas puntuales van en nodos.
 - Presentación de resortes (UI y PDF): Kx, Ky en kN/m (= N/mm) y Krz en kN·m/rad; rótulo del vínculo
   `"<rígido> + elástico"`, o `"elástico"` si el nodo es libre o sólo tiene resorte; la tabla de
   reacciones (app y PDF) lista también los nodos que sólo tienen resorte. Kx se dibuja hacia afuera
@@ -133,7 +148,7 @@ Notación: fluencia **S<sub>y</sub>** (`Sy`) en mensajes, PDF y glosario; `Fx`, 
 - Dibujo de hipótesis (UI y PDF, misma convención): D naranja, L violeta; en una barra con D y L del
   mismo sentido la L se apila sobre la D y el rótulo de la D pasa al otro lado de la barra; con cargas L
   los rótulos indican la hipótesis (`qD`, `qL`, `(D)`, `(L)`). Una entrada de leyenda por hipótesis.
-- Hipótesis de carga: `NodalLoad.case` / `DistributedLoad.case` (y `BeamPointLoad` / `BeamDistLoad` de
+- Hipótesis de carga: `NodalLoad.case` / `DistributedLoad.case` / `ThermalLoad.case` (y `BeamPointLoad` / `BeamDistLoad` de
   `builders`) = `LoadCase.DEAD` (`"D"`, **por defecto**: el peso propio y toda carga sin `case` es D) o
   `LoadCase.LIVE` (`"L"`). `solve()` resuelve **todas** las cargas con γ = 1 (sin L es la resolución de
   siempre). Las combinaciones (`LoadCombination(name, gamma_D, gamma_L, limit_state)`, `"ELU"`/`"ELS"`)
@@ -175,7 +190,7 @@ core.model.Member(i, j, section, material, release_start=False, release_end=Fals
 core.model.Spring(node, kx=0.0, ky=0.0, krz=0.0); Model.springs: list[Spring] = []  # resortes
 core.model.Spring.inert(support_type) -> tuple[str, ...]; .active(support_type) -> Spring; .is_null
 core.model.LoadCase.DEAD | LoadCase.LIVE  # "D" | "L"; campo `case=LoadCase.DEAD` al final de NodalLoad,
-                                          # DistributedLoad, BeamPointLoad, BeamDistLoad
+                                          # DistributedLoad, BeamPointLoad, BeamDistLoad; ThermalLoad.case
 core.model.LoadCombination(name, gamma_D, gamma_L, limit_state="ELU")  # "ELU" | "ELS"
 core.model.COMB_1_4D, COMB_1_2D_1_6L, COMB_SERVICE_D_L, ULS_COMBINATIONS; Model.load_cases(), .has_live_loads()
 core.solver.solve_load_cases(model, n_stations=41) -> dict[LoadCase, Results]  # D siempre; L si hay
@@ -225,6 +240,13 @@ core.verification.SafetyCheck: .critical_stability, .stability_utilization, .sta
                                .stability_governs, .uls_ok, .stability_notes
 core.verification.CombinationCheck: .stability_governing -> (comb, SafetyCheck), .stability_utilization,
                                     .stability_ok, .stability_governs
+# ---- Cargas térmicas y pórticos genéricos (backlog 6) ----
+core.materials.Material(name, E, Sy, Su, nu=0.3, rho=7850.0, alpha=1.2e-5)  # alpha [1/°C], finito ≥ 0
+core.model.ThermalLoad(member, delta_t, case=LoadCase.DEAD, strain=0.0)  # ΔT [°C]; strain [-]
+core.model.ThermalLoad.imposed_strain(alpha) -> float          # ε₀ = α·ΔT + strain
+core.model.Model.thermal_loads: list[ThermalLoad] = []         # incluido en Model.load_cases()
+core.builders.build_frame(nodes, members, supports, nodal_loads=None, distributed_loads=None,
+                          thermal_loads=None, springs=None, self_weight=False) -> Model  # topología libre
 core.materials.Section.linear_mass(rho) -> float [kg/m]       # mass_per_m = linear_mass(7850), acero
 core.materials.FAMILY_NOTES[family] -> str                   # fuente y supuestos de cada familia
 core.materials.family_warnings(family) -> tuple[str, ...]    # advertencias de alcance (UI y PDF)
@@ -373,7 +395,15 @@ Backlog priorizado (no implementar sin tarea explícita):
    `weak_axis_bending_stress`, `W_top/W_bot`. `suggest_section(lambda s: build(s.weak_axis()), ...)` ya
    busca el perfil en eje débil. **Pendiente Frontend**: selector "eje fuerte / eje débil (invertido)" en
    `ui/inputs.py`. Fuera de alcance: flexión esviada combinada (M_z + M_y en una misma sección).
-6. Pórticos genéricos (editor de nodos/barras) y cargas térmicas.
+6. ~~Pórticos genéricos y cargas térmicas~~ → **core completado**: `Material.alpha`, `ThermalLoad` (ΔT uniforme +
+   deformación axial impuesta `strain`), `Model.thermal_loads`, término térmico en `solve` (f_eq axial,
+   N = N_cin − EAα·ΔT, elástica u' = N/EA + ε₀), integrado a hipótesis D/L y combinaciones, y `build_frame`
+   (nodos (X, Y) y conectividad libres, barras inclinadas, validación de geometría). `check_safety` /
+   `check_combinations` (incl. H1) ya ven el axil térmico. Test: `test_thermal_and_frames.py`.
+   **Pendiente Frontend/PDF**: editor de nodos/barras (tablas X, Y e i → j con sección, material y rótulas) y
+   ΔT por barra con hipótesis en `ui/inputs.py`; símbolo de ΔT en `ui/plots.py` y en el esquema/tabla de cargas
+   de `core/reports.py` (hoy el PDF **no lista** las cargas térmicas); α y ΔT en `core/glossary.py`.
+   Fuera de alcance: gradiente térmico en la altura (curvatura impuesta), apoyos móviles inclinados.
 7. ~~Reporte PDF de memoria de cálculo~~ → hecho (`core/reports.py`), con esquema de cargas,
    deformada, diagramas N-V-M-σ vectoriales, convenciones de signo y glosario/simbología (§6 del PDF).
    Si se cambia un gráfico de `ui/plots.py`, revisar que el equivalente del PDF siga la misma
@@ -392,6 +422,8 @@ fórmulas de acero (orientativas para aluminio). En canales UPN el Cw de pared d
 mayor que el de tabla. Secciones personalizadas sin J/Cw/h0: PLT no evaluado (`stability_notes`).
 von Mises se evalúa sólo en la fibra extrema y en el eje neutro (no en la unión ala-alma de los
 doble T, donde σ y τ coexisten); τ es la de Jourawski (corte elástico, sin plastificación del alma).
+Temperatura: sólo ΔT uniforme en la sección (sin gradiente), α constante (sin variación de E ni Sy con la
+temperatura). Apoyos móviles sólo sobre superficie horizontal (restringen uy).
 Flecha: δ_máx es el desplazamiento total máximo de toda la estructura (en pórticos incluye el
 desplazamiento lateral) referido a una única L; en voladizos L es la longitud del voladizo.
 Por familia (`family_warnings()`): torsión no modelada en canales UPN / C cuando la carga no
