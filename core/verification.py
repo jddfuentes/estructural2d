@@ -23,6 +23,9 @@ Corte y tensión equivalente (`member_stresses`, AGENTS.md §4):
   (σ = N/A, τ = τ_máx) → σ_vM,corte = √((N/A)² + 3·τ²). Gobierna σ_vM = máx de ambos.
   FS = Sy / σ_vM,máx (y en ELU σ_vM,u ≤ φ·Sy). En flexión dominante σ_vM = σ_max y el resultado es
   idéntico al de tensión normal pura; una sección sin datos de corte (Q = 0) toma τ = 0.
+- Cargas térmicas / deformaciones impuestas: el N de `MemberResult` ya incluye la fuerza de fijación
+  −E·A·ε₀ (ver `core.solver`), así que σ = N/A ± M·c/I, σ_vM, ELU y la compresión N_comp de la
+  interacción H1 (estabilidad) incorporan los esfuerzos térmicos sin tratamiento aparte.
 - Eje débil: la sección se orienta con `Section.weak_axis()` (análisis plano en eje débil) o, para
   un momento fuera del plano M_y, `weak_axis_bending_stress` da σ = |M_y| / W_y.
 
@@ -135,7 +138,8 @@ class MemberStresses:
 def member_stresses(section: Section, mr: MemberResult) -> MemberStresses:
     """σ normales, τ de corte y von Mises en cada estación de la barra (ver docstring del módulo).
 
-    Usa σ_top / σ_bot del solver (convención AGENTS.md §4, exactas con c_top ≠ c_bot).
+    Usa σ_top / σ_bot del solver (convención AGENTS.md §4, exactas con c_top ≠ c_bot). N incluye el
+    esfuerzo axial de origen térmico (N = N_cinemático − E·A·α·ΔT), por lo que σ_axial = N/A también.
     """
     sigma_max = mr.sigma_abs
     sigma_axial = mr.N / section.A

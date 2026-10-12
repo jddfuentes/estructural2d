@@ -1,7 +1,9 @@
-"""Constructores paramétricos de modelos típicos (viga continua, pórtico simple).
+"""Constructores de modelos: viga continua, pórtico simple y pórtico/malla 2D genérico.
 
-Traducen una definición "de ingeniero" (posiciones x a lo largo de la viga)
-a un `Model` de nodos y barras. Sin UI. Unidades: mm, N, N/mm, N·mm.
+`build_beam` / `build_portal_frame` traducen una definición "de ingeniero" (posiciones x a lo
+largo de la viga) a un `Model` de nodos y barras. `build_frame` arma un pórtico de topología libre
+(nodos (X, Y) explícitos, barras i → j en cualquier orientación, vínculos en cualquier nodo) y
+valida la geometría. Sin UI. Unidades: mm, N, N/mm, N·mm.
 Signos en ejes globales: Fy < 0 y q < 0 = hacia abajo.
 
 Como el solver es exacto por barra, sólo se crean nodos en puntos singulares
@@ -10,6 +12,8 @@ Como el solver es exacto por barra, sólo se crean nodos en puntos singulares
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from core.materials import Material, Section
@@ -21,8 +25,10 @@ from core.model import (
     Member,
     Model,
     NodalLoad,
+    Spring,
     Support,
     SupportType,
+    ThermalLoad,
 )
 
 G = 9.80665  # [m/s²]
@@ -178,6 +184,75 @@ def build_portal_frame(
             DistributedLoad(m, beam_q, beam_q, LoadDirection.GLOBAL_Y, case=beam_q_case)
             for m in beam_members
         ]
+    if self_weight:
+        _add_self_weight(model)
+    return model
+
+
+def build_frame(
+    nodes: Sequence[tuple[float, float]],
+    members: Sequence[Member],
+    supports: Sequence[Support],
+    nodal_loads: Sequence[NodalLoad] | None = None,
+    distributed_loads: Sequence[DistributedLoad] | None = None,
+    thermal_loads: Sequence[ThermalLoad] | None = None,
+    springs: Sequence[Spring] | None = None,
+    self_weight: bool = False,
+) -> Model:
+    """Pórtico o malla plana de topología libre.
+
+    nodes: coordenadas globales (X, Y) [mm] de cada nodo; el índice en la lista es su número.
+    members: barras `Member(i, j, section, material, release_start, release_end)` con conectividad
+        arbitraria e inclinación cualquiera (ejes locales: x de i a j, y local = x rotado +90°).
+    supports: vínculos rígidos `Support(node, type)` en cualquier nodo (empotrado, articulado, móvil
+        sobre superficie horizontal —restringe uy— o libre); springs: apoyos elásticos `Spring`.
+    nodal_loads / distributed_loads / thermal_loads: cargas con su hipótesis (`case`, D por defecto);
+        `DistributedLoad.member` y `ThermalLoad.member` refieren al índice de la barra en `members`.
+    self_weight: agrega el peso propio (hipótesis D) a todas las barras.
+
+    No subdivide barras: el solver es exacto por barra; las cargas puntuales van en nodos.
+
+    Raises:
+        ValueError: coordenadas no finitas, nodos coincidentes, nodos sin barras, barras repetidas
+            entre el mismo par de nodos o cualquier inconsistencia de `Model.validate()`.
+    """
+    pts = [(float(x), float(y)) for x, y in nodes]
+    for k, (x, y) in enumerate(pts):
+        if not (math.isfinite(x) and math.isfinite(y)):
+            raise ValueError(f"Nodo {k}: coordenadas no finitas ({x}, {y}).")
+    for a in range(len(pts)):
+        for b in range(a + 1, len(pts)):
+            if math.hypot(pts[b][0] - pts[a][0], pts[b][1] - pts[a][1]) <= _TOL:
+                raise ValueError(
+                    f"Nodos {a} y {b} coincidentes en ({pts[a][0]:g}, {pts[a][1]:g}) mm: unificarlos y "
+                    "conectar las barras al mismo nodo."
+                )
+    pairs: dict[frozenset[int], int] = {}
+    for k, mem in enumerate(members):
+        key = frozenset((mem.i, mem.j))
+        if key in pairs and len(key) == 2:
+            raise ValueError(
+                f"Barras {pairs[key]} y {k} unen los mismos nodos ({mem.i}, {mem.j}): sumar sus "
+                "propiedades en una única barra."
+            )
+        pairs[key] = k
+    connected = {n for mem in members for n in (mem.i, mem.j)}
+    loose = [k for k in range(len(pts)) if k not in connected]
+    if loose and members:
+        raise ValueError(
+            f"Nodos sin barras: {', '.join(map(str, loose))}. Conectarlos a una barra o eliminarlos."
+        )
+
+    model = Model(
+        nodes=pts,
+        members=list(members),
+        supports=list(supports),
+        nodal_loads=list(nodal_loads or []),
+        distributed_loads=list(distributed_loads or []),
+        springs=list(springs or []),
+        thermal_loads=list(thermal_loads or []),
+    )
+    model.validate()
     if self_weight:
         _add_self_weight(model)
     return model

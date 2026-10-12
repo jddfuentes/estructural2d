@@ -62,6 +62,16 @@ class Material:
     Su: float  # Tensión de rotura [MPa]
     nu: float = 0.3  # Coeficiente de Poisson [-]
     rho: float = 7850.0  # Densidad [kg/m³]
+    # Coeficiente de dilatación térmica lineal [1/°C]. Acero estructural: 12·10⁻⁶ 1/°C
+    # (EN 1993-1-1 §3.2.6; mismo valor usual en CIRSOC 301). Agregado al final (AGENTS.md §5).
+    alpha: float = 1.2e-5
+
+    def __post_init__(self) -> None:
+        if not (math.isfinite(self.alpha) and self.alpha >= 0.0):
+            raise ValueError(
+                f"Material {self.name!r}: coeficiente de dilatación térmica α = {self.alpha} no válido; "
+                "debe ser un número finito ≥ 0 [1/°C] (acero ≈ 1,2·10⁻⁵)."
+            )
 
     @property
     def G(self) -> float:
@@ -78,7 +88,8 @@ MATERIALS: dict[str, Material] = {
         Material("ASTM A572 Gr.50", E=200_000.0, Sy=345.0, Su=450.0),
         Material("API 5L X52", E=207_000.0, Sy=359.0, Su=455.0),
         Material("SAE 1045 (laminado)", E=205_000.0, Sy=310.0, Su=565.0),
-        Material("Al 6061-T6", E=68_900.0, Sy=276.0, Su=310.0, nu=0.33, rho=2700.0),
+        # Al 6061-T6: α = 23,6·10⁻⁶ 1/°C (20–100 °C; ASM Handbook Vol. 2 / Aluminum Association)
+        Material("Al 6061-T6", E=68_900.0, Sy=276.0, Su=310.0, nu=0.33, rho=2700.0, alpha=2.36e-5),
     )
 }
 

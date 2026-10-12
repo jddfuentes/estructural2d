@@ -27,6 +27,15 @@ Formulación
   polinomios N, V, M, u, v (`MemberPolynomials`), se combinan sus coeficientes y se re-muestrea
   con la misma regla de estaciones que `solve`, de modo que el resultado es el mismo que el de
   una corrida única con las cargas mayoradas (incluidos los extremos exactos de M y flecha).
+- Cargas térmicas y deformaciones axiales impuestas (`Model.thermal_loads`): ε₀ = α·ΔT + ε_imp.
+  Estado de empotramiento perfecto de la barra: alargamiento impedido ⇒ N₀ = −E·A·ε₀ (compresión
+  si ε₀ > 0). Fuerzas de empotramiento sobre la barra (locales) f_emp = (+EAε₀, 0, 0, −EAε₀, 0, 0)
+  (el nudo i la empuja hacia +x local, el j hacia −x); las cargas nodales equivalentes que la barra
+  aplica a los nudos son su opuesto, f_eq = (−EAε₀, 0, 0, +EAε₀, 0, 0), que se rotan con Tᵀ·f_eq y
+  se ensamblan como las de tramo. Postproceso: N = EA·(u_j − u_i)/L − EA·ε₀ (sale de f = k·u − f_eq)
+  y la elástica axial integra la deformación total u' = N/EA + ε₀. Sin componentes de flexión: las
+  rótulas no las alteran (la condensación sólo actúa sobre los giros). Una barra que puede alargarse
+  libremente (p. ej. con un extremo sobre apoyo móvil en su dirección) queda con N = 0 y ΔL = ε₀·L.
 
 Convención de signos de solicitaciones (ejes locales de cada barra, x de i a j):
 - N > 0 tracción.
@@ -400,15 +409,15 @@ def _solve_cases(model: Model, cases: Sequence[LoadCase | None], n_stations: int
     model.validate()
     system = _assemble(model)
     loads = [_case_loads(model, system, case) for case in cases]
-    F = np.column_stack([F_c for F_c, _, _ in loads])
+    F = np.column_stack([F_c for F_c, _, _, _ in loads])
     U = np.zeros_like(F)
     free = system.free
     if free.any():  # (puede no haber GDL libres: p.ej. barra biempotrada sin nodos intermedios)
         d = system.d[:, None]
         U[free] = d * np.linalg.solve(system.Ks, d * F[free])
     return [
-        _results(model, system, U[:, c], F_c, member_q, f_eqs, n_stations)
-        for c, (F_c, member_q, f_eqs) in enumerate(loads)
+        _results(model, system, U[:, c], F_c, member_q, eps0, f_eqs, n_stations)
+        for c, (F_c, member_q, eps0, f_eqs) in enumerate(loads)
     ]
 
 
@@ -473,11 +482,15 @@ def _assemble(model: Model) -> _System:
 
 def _case_loads(
     model: Model, system: _System, case: LoadCase | None
-) -> tuple[FloatArray, FloatArray, list[FloatArray]]:
-    """Vector global F, cargas de tramo locales (qx1, qx2, qy1, qy2) por barra y f_eq locales
-    de la hipótesis `case` (`None` = todas las cargas)."""
+) -> tuple[FloatArray, FloatArray, FloatArray, list[FloatArray]]:
+    """Vector global F, cargas de tramo locales (qx1, qx2, qy1, qy2) por barra, deformación axial
+    impuesta ε₀ por barra y f_eq locales de la hipótesis `case` (`None` = todas las cargas)."""
     F = np.zeros(model.n_dof)
     member_q = np.zeros((len(model.members), 4))
+    eps0 = np.zeros(len(model.members))  # ε₀ = α·ΔT + ε_imp por barra (cargas térmicas)
+    for tl in model.thermal_loads:
+        if case is None or tl.case is case:
+            eps0[tl.member] += tl.imposed_strain(model.members[tl.member].material.alpha)
     for dl in model.distributed_loads:
         if case is None or dl.case is case:
             c, s = model.member_cos_sin(dl.member)
@@ -488,6 +501,10 @@ def _case_loads(
     for m, el in enumerate(system.elements):
         qx1, qx2, qy1, qy2 = member_q[m]
         f_eq = equivalent_nodal_loads((qx1, qx2), (qy1, qy2), el.length)
+        if eps0[m] != 0.0:  # alargamiento impedido: la barra empuja i hacia −x y j hacia +x (locales)
+            mem = model.members[m]
+            n0 = mem.material.E * mem.section.A * eps0[m]  # = −N₀ de empotramiento perfecto [N]
+            f_eq = f_eq + np.array([-n0, 0.0, 0.0, n0, 0.0, 0.0])
         if el.released:  # cargas de empotramiento de la barra con rótula (p.ej. 3qL/8, 5qL/8, qL²/8)
             f_eq = static_condensation(el.k_full, f_eq, el.released)[1]
         F[el.dofs] += el.T.T @ f_eq
@@ -496,7 +513,7 @@ def _case_loads(
     for p in model.nodal_loads:
         if case is None or p.case is case:
             F[3 * p.node : 3 * p.node + 3] += (p.Fx, p.Fy, p.Mz)
-    return F, member_q, f_eqs
+    return F, member_q, eps0, f_eqs
 
 
 def _results(
@@ -505,6 +522,7 @@ def _results(
     U: FloatArray,
     F: FloatArray,
     member_q: FloatArray,
+    eps0: FloatArray,
     f_eqs: list[FloatArray],
     n_stations: int,
 ) -> Results:
@@ -525,7 +543,7 @@ def _results(
     }
 
     members = [
-        _member_results(model, m, el, f_eqs[m], U[el.dofs], member_q[m], n_stations)
+        _member_results(model, m, el, f_eqs[m], U[el.dofs], member_q[m], float(eps0[m]), n_stations)
         for m, el in enumerate(system.elements)
     ]
     return Results(displacements=U.reshape(-1, 3).copy(), reactions=reactions, members=members)
@@ -615,6 +633,7 @@ def _member_results(
     f_eq: FloatArray,
     u_global: FloatArray,
     q: FloatArray,
+    eps0: float,
     n_stations: int,
 ) -> MemberResult:
     mem = model.members[m]
@@ -624,6 +643,7 @@ def _member_results(
     ul = el.T @ u_global
     # Fuerzas de extremo sobre la barra (locales). Con rótula, k y f_eq están condensadas:
     # la componente de momento liberada es 0.0 exacto y el giro nodal no interviene.
+    # Con carga térmica f_eq incluye la fuerza de fijación: N = EA·(u_j − u_i)/L − EA·ε₀.
     f = el.k @ ul - f_eq
     qx1, qx2, qy1, qy2 = q
 
@@ -634,8 +654,8 @@ def _member_results(
     Vpoly = f[1] + qy.integ()
     Mpoly = P([-f[2]]) + Vpoly.integ()  # dM/dx = V, M(0) = -M_i
 
-    # Elástica: u' = N/EA ; v'' = M/EI ; con v(0)=v1, v(L)=v2
-    upoly = ul[0] + (Npoly / (E * sec.A)).integ()
+    # Elástica: u' = N/EA + ε₀ (deformación mecánica + impuesta) ; v'' = M/EI ; con v(0)=v1, v(L)=v2
+    upoly = ul[0] + (Npoly / (E * sec.A) + eps0).integ()
     m2 = (Mpoly / (E * sec.I)).integ(2)  # particular con v(0)=v'(0)=0
     c1 = (ul[4] - ul[1] - m2(L)) / L
     vpoly = m2 + P([ul[1], c1])

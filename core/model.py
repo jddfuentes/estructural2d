@@ -11,6 +11,10 @@ Vínculos: rígidos (`Support`) y/o elásticos (`Spring`: resortes nodales kx, k
 Hipótesis de carga: cada carga pertenece a un `LoadCase` (D = permanente, L = sobrecarga de uso;
 por defecto D). Las combinaciones normativas (`LoadCombination`) se arman en el solver por
 superposición lineal de las respuestas de cada hipótesis.
+
+Cargas térmicas (`ThermalLoad`): variación uniforme de temperatura ΔT [°C] en una barra (y,
+opcionalmente, una deformación axial impuesta adicional ε_imp [-]). Deformación axial libre
+ε₀ = α·ΔT + ε_imp; sólo produce esfuerzos si la estructura impide el alargamiento.
 """
 
 from __future__ import annotations
@@ -162,6 +166,34 @@ class DistributedLoad:
         object.__setattr__(self, "case", _as_load_case(self.case))
 
 
+@dataclass(frozen=True, slots=True)
+class ThermalLoad:
+    """Variación uniforme de temperatura ΔT en una barra (+ deformación axial impuesta opcional).
+
+    Deformación axial libre (sin tensión) de la barra: ε₀ = α·ΔT + `strain`, con α del material de
+    la barra [1/°C]. ΔT > 0 dilata (alarga), ΔT < 0 contrae. `strain` [-] es una deformación axial
+    impuesta adicional (p. ej. falta de ajuste: ε = ΔL/L; > 0 barra más larga que la distancia entre
+    nudos). Uniforme en la sección: no hay gradiente térmico (no induce curvatura propia).
+    """
+
+    member: int
+    delta_t: float  # [°C] variación uniforme de temperatura (> 0 dilatación)
+    case: LoadCase = LoadCase.DEAD  # hipótesis de carga (acepta también "D" / "L")
+    strain: float = 0.0  # [-] deformación axial impuesta adicional (alargamiento > 0)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "case", _as_load_case(self.case))
+        for name, val in (("ΔT", self.delta_t), ("deformación impuesta", self.strain)):
+            if not math.isfinite(val):
+                raise ValueError(
+                    f"Carga térmica en barra {self.member}: {name} = {val} no es un número finito."
+                )
+
+    def imposed_strain(self, alpha: float) -> float:
+        """ε₀ = α·ΔT + ε_imp [-]: alargamiento unitario libre de la barra (α [1/°C])."""
+        return alpha * self.delta_t + self.strain
+
+
 def _as_load_case(case: LoadCase | str) -> LoadCase:
     """Normaliza la hipótesis de carga ("D" / "L" o `LoadCase`); ValueError si no existe."""
     try:
@@ -226,6 +258,7 @@ class Model:
     nodal_loads: list[NodalLoad] = field(default_factory=list)
     distributed_loads: list[DistributedLoad] = field(default_factory=list)
     springs: list[Spring] = field(default_factory=list)  # apoyos elásticos (resortes nodales)
+    thermal_loads: list[ThermalLoad] = field(default_factory=list)  # ΔT / deformación axial impuesta
 
     @property
     def n_dof(self) -> int:
@@ -244,7 +277,11 @@ class Model:
 
     def load_cases(self) -> tuple[LoadCase, ...]:
         """Hipótesis con al menos una carga, en el orden de `LoadCase` (D primero)."""
-        used = {p.case for p in self.nodal_loads} | {q.case for q in self.distributed_loads}
+        used = (
+            {p.case for p in self.nodal_loads}
+            | {q.case for q in self.distributed_loads}
+            | {t.case for t in self.thermal_loads}
+        )
         return tuple(c for c in LoadCase if c in used)
 
     def has_live_loads(self) -> bool:
@@ -292,3 +329,6 @@ class Model:
         for q in self.distributed_loads:
             if not 0 <= q.member < len(self.members):
                 raise ValueError(f"Carga distribuida en barra inexistente: {q.member}.")
+        for t in self.thermal_loads:
+            if not 0 <= t.member < len(self.members):
+                raise ValueError(f"Carga térmica en barra inexistente: {t.member}.")
