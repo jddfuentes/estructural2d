@@ -73,7 +73,8 @@ excepción y genera el PDF sin esa imagen. `core/` nunca importa Plotly ni kalei
 Excepciones, sólo de presentación (texto, nunca números devueltos al resto del core):
 - `core/reports.py` convierte a unidades de ingeniería **sólo para imprimir** (constantes `_M`, `_KN`,
   `_KNM`, `_CM*` al inicio del módulo).
-- `core/verification.py` redacta las coordenadas de `issues` en m (`_MM_TO_M_TEXT`, helper `_where`).
+- `core/verification.py` redacta `issues` en m, kN y kN·m (`_MM_TO_M_TEXT`, `_N_TO_KN_TEXT`,
+  `_NMM_TO_KNM_TEXT`, helper `_where`).
 - `Section.linear_mass(rho)` / `mass_per_m` devuelven kg/m (A [mm²]·1e-6·ρ [kg/m³]): es la fórmula de la
   masa lineal, no una conversión de UI; `mass_per_m` es la de catálogo en acero (ρ = 7850).
 Notación: fluencia **S<sub>y</sub>** (`Sy`) en mensajes, PDF y glosario; `Fx`, `Fy` son fuerzas.
@@ -206,6 +207,24 @@ core.verification.weak_axis_bending_stress(section, M_y) -> float  # |M_y| / W_y
 core.verification.SafetyCheck: .tau_max, .sigma_vm_max, .shear_governs  # de la barra crítica;
                                # .sigma_max sigue siendo la tensión NORMAL máx; .fs y .utilization usan σ_vM
 core.verification.CombinationCheck: .tau_max, .sigma_vm_max   # de la combinación gobernante
+# ---- Estabilidad (backlog 3, AISC 360-16 = CIRSOC 301-2005) ----
+core.materials.Section(..., Z=0, Z_y=0, J=0, Cw=0, h0=0)   # al final [mm³, mm³, mm⁴, mm⁶, mm]; Z = 2·Q auto
+core.materials.Section.r_x, .r_y, .r_min, .r_ts [mm]; .has_ltb_data   # r_x: eje de flexión (I)
+core.materials.custom(..., Z=0.0, J=0.0, Cw=0.0, h0=0.0); CLOSED_FAMILIES; SOLID_FAMILY
+core.verification.column_buckling_capacity(section, L, K=1.0, Fy=250.0, phi_c=0.9, *, E=200000.0,
+                                           N_comp=0.0) -> ColumnBucklingCheck  # .Pn, .phi_Pn, .utilization
+core.verification.beam_ltb_capacity(section, Lb, Fy=250.0, Cb=1.0, phi_b=0.9, *, E=200000.0,
+                                    M_u=0.0) -> BeamLTBCheck  # .Mp, .Lp, .Lr, .Mn, .phi_Mn, .zone, .utilization
+core.verification.interaction_h1(Pr, Pc, Mr, Mc) -> float     # AISC H1-1a/b
+core.verification.physical_members(model) -> tuple[tuple[int, ...], ...]  # cadenas colineales
+core.verification.check_safety(..., *, stability=False, unbraced_length=None, effective_length_factor_k=1.0)
+core.verification.check_combinations(..., *, stability=False, unbraced_length=None,
+                                     effective_length_factor_k=1.0)   # estabilidad sólo en ELU
+core.verification.SafetyCheck.stability: tuple[MemberStabilityCheck, ...] = ()  # una por barra física
+core.verification.SafetyCheck: .critical_stability, .stability_utilization, .stability_ok, .buckling_failure,
+                               .stability_governs, .uls_ok, .stability_notes
+core.verification.CombinationCheck: .stability_governing -> (comb, SafetyCheck), .stability_utilization,
+                                    .stability_ok, .stability_governs
 core.materials.Section.linear_mass(rho) -> float [kg/m]       # mass_per_m = linear_mass(7850), acero
 core.materials.FAMILY_NOTES[family] -> str                   # fuente y supuestos de cada familia
 core.materials.family_warnings(family) -> tuple[str, ...]    # advertencias de alcance (UI y PDF)
@@ -228,6 +247,11 @@ Toda familia nueva lleva entrada en `FAMILY_NOTES` (hay test que lo controla).
 
 Verificación (`Status`): `FLUENCIA` si FS < 1; `ALERTA` si FS < FS_min **o** la flecha supera
 L/N (estado límite de servicio, sin fluencia); `OK` sólo si verifican resistencia y flecha.
+Con `stability=True`: `FLUENCIA` (severidad) también si una barra física es inestable con resistencias
+nominales (utilización H1 nominal > 1; `issues` dice "Inestabilidad…" y el PDF "INESTABILIDAD"); `ALERTA` si
+la utilización H1 con Pn/FS_min, Mn/FS_min supera 1. En combinaciones, Pu/Mu frente a φPn/φMn: no verificar
+da `verdict = (FAIL, "NO VERIFICA")`. `strength_ok` sigue siendo **sólo** tensiones de la sección;
+`stability_ok` / `uls_ok` incluyen la estabilidad. Sin `stability=True` el resultado es idéntico al anterior.
 `deflection_limit_ratio = 0` desactiva el control de flecha. L por defecto: ancho horizontal del
 modelo (`default_reference_length`). `max_deflection` [mm] de `suggest_section`, si se da,
 reemplaza a `deflection_limit_ratio`. El motivo de un veredicto no-OK se lee de
@@ -328,7 +352,16 @@ Backlog priorizado (no implementar sin tarea explícita):
    `test_reports.py`, `test_deflection.py`. q y H del pórtico eligen hipótesis D o L
    (`beam_q_case`, `lateral_case`). Fuera de alcance (tarea aparte): ASD y cargas Lr / S / R / W / E
    (H lateral no se trata como viento: entra como D o L).
-3. Pandeo flexional de columnas y pandeo lateral-torsional de vigas.
+3. ~~Pandeo flexional de columnas y pandeo lateral-torsional de vigas~~ → **core completado**:
+   `Section.Z/Z_y/J/Cw/h0`, `r_x/r_y/r_min/r_ts` (IPE/W: J El Darwish-Johnston con acuerdos y Cw = Iy·h0²/4,
+   < 1 % de tabla; IPN: J sin acuerdos, conservador; UPN/C: pared delgada DG9), `column_buckling_capacity`
+   (E3), `beam_ltb_capacity` (F2 doble T y canales, F11 planchuelas; sin PLT en eje débil, tubos, redondos),
+   `interaction_h1`, `physical_members` y `check_safety/check_combinations(stability=True, ...)`.
+   Test: `test_buckling.py`. Criterio: KL y Lb sobre la **barra física** (los constructores parten vigas en
+   cada carga puntual); Cb = 1; Lb = mín(unbraced_length, L). **Pendiente Frontend/PDF**: checkbox
+   "verificar estabilidad" + inputs Lb [m] y K en `ui/inputs.py`, tabla por barra física (KL/r, φPn, Lb,
+   zona, φMn, utilización H1) en `app.py` y §4 del PDF, `stability_notes`, y símbolos (λ, Fe, Fcr, Pn, K, Lb,
+   Lp, Lr, Mp, Mn, Cb, J, Cw, r_ts) en `core/glossary.py`. Pasar `stability` a `suggest_section`.
 4. ~~Tensión de corte (τ = VQ/It) y von Mises combinada~~ → **core completado**: `Section.Q_max/t_web`
    para todo el catálogo (IPE/W por geometría con acuerdos deducidos del área de tabla; IPN/UPN con tf
    medio; tubos, macizos y C conformado exactos), `shear_stress`, `von_mises`, `member_stresses`,
@@ -351,7 +384,12 @@ Backlog priorizado (no implementar sin tarea explícita):
 ## 10. Limitaciones que la UI debe seguir comunicando
 
 Elástico lineal, pequeñas deformaciones, Euler-Bernoulli (sin deformación por corte),
-sin efectos de segundo orden, sin pandeo ni fatiga, propiedades de catálogo nominales.
+sin efectos de segundo orden, sin fatiga, propiedades de catálogo nominales.
+Estabilidad (sólo con `stability=True`): solicitaciones de primer orden (sin B1/B2 ni análisis directo; en
+pórticos desplazables el K debe representar el desplazamiento lateral), Cb = 1, KL con la barra física y r_min
+(no aprovecha arriostramientos intermedios), sin pandeo local (§E7), torsional ni flexotorsional (§E4);
+fórmulas de acero (orientativas para aluminio). En canales UPN el Cw de pared delgada con tf medio es ≈ 15 %
+mayor que el de tabla. Secciones personalizadas sin J/Cw/h0: PLT no evaluado (`stability_notes`).
 von Mises se evalúa sólo en la fibra extrema y en el eje neutro (no en la unión ala-alma de los
 doble T, donde σ y τ coexisten); τ es la de Jourawski (corte elástico, sin plastificación del alma).
 Flecha: δ_máx es el desplazamiento total máximo de toda la estructura (en pórticos incluye el
