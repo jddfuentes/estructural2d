@@ -78,6 +78,7 @@ from core.verification import (
     Status,
     default_reference_length,
     member_stresses,
+    stress_maxima,
 )
 
 __all__ = ["build_pdf_report"]
@@ -447,7 +448,7 @@ def _criteria_items(check: SafetyCheck | CombinationCheck, L_ref: float) -> list
              if check.deflection_limit_ratio > 0 else
              "Criterio de servicio: sin límite de flecha (sólo se informa L/δ)."),
         ]
-    stability = check.strength if isinstance(check, CombinationCheck) else check
+    stability = check.stability_governing[1] if isinstance(check, CombinationCheck) else check
     if stability.stability:
         cs = stability.critical_stability
         if cs is not None:
@@ -646,20 +647,19 @@ def _section_results(model: Model, results: Results, L_ref: float, figs: _Figure
                [0.30, 0.17, 0.12, 0.11, 0.30], num_cols={1}),
         _p("Valor con signo del máximo en valor absoluto de toda la estructura.", "note"),
     ]))
-    stress_rows = []
-    tau_max = 0.0
-    vm_max = 0.0
-    tau_member = vm_member = 0
-    for mr in results.members:
-        stresses = member_stresses(model.members[mr.member].section, mr)
-        if float(np.max(stresses.tau)) > tau_max:
-            tau_max, tau_member = float(np.max(stresses.tau)), mr.member
-        if float(np.max(stresses.sigma_vm)) > vm_max:
-            vm_max, vm_member = float(np.max(stresses.sigma_vm)), mr.member
-    stress_rows.extend([
-        ["Tensión tangencial máxima τ", f"{tau_max:,.3f}", "MPa", str(tau_member), "—"],
-        ["Tensión de von Mises σvM", f"{vm_max:,.3f}", "MPa", str(vm_member), "—"],
-    ])
+    # Máximos de TODA la estructura: la misma magnitud que el KPI de la app y que §4 (fuente única
+    # `stress_maxima`; con combinaciones, la de `combo` = combinación gobernante).
+    if combo is not None:
+        tau_max, tau_member = combo.tau_max_global, combo.tau_max_global_member
+        vm_max, vm_member = combo.sigma_vm_max_global, combo.sigma_vm_max_global_member
+    else:
+        glob = stress_maxima(model, results)
+        tau_max, tau_member, vm_max, vm_member = (glob.tau_max, glob.tau_member, glob.sigma_vm_max,
+                                                  glob.sigma_vm_member)
+    stress_rows = [
+        ["Tensión tangencial máxima global τ<sub>máx</sub>", f"{tau_max:,.3f}", "MPa", str(tau_member), "—"],
+        ["Tensión de von Mises máxima global σ<sub>vM</sub>", f"{vm_max:,.3f}", "MPa", str(vm_member), "—"],
+    ]
     out.append(_table(["Tensión", "Valor máx.", "Unidad", "Barra", "Ubicación"], stress_rows,
                       [0.30, 0.17, 0.12, 0.11, 0.30], num_cols={1}))
     if figs is not None:
@@ -692,8 +692,9 @@ def _section_verification(check: SafetyCheck | CombinationCheck) -> list[Flowabl
     rows = [
         ["Tensión de fluencia S<sub>y</sub>", f"{check.sy:g} MPa"],
         [f"Tensión normal máxima |{_g('s')}|<sub>máx</sub>", f"{check.sigma_max:,.1f} MPa"],
-        ["Tensión tangencial máxima τ<sub>máx</sub>", f"{check.tau_max:,.1f} MPa"],
-        ["Tensión de von Mises gobernante σ<sub>vM</sub>", f"{check.sigma_vm_max:,.1f} MPa"],
+        *_tau_rows(check.tau_max_global, check.tau_max_global_member, check.tau_max, check.member),
+        [f"Tensión de von Mises en la barra crítica σ<sub>vM</sub> (barra {check.member})",
+         f"{check.sigma_vm_max:,.1f} MPa"],
         ["Ubicación crítica",
          f"barra {check.member}, ({check.point[0] * _M:.3f}; {check.point[1] * _M:.3f}) m"],
         ["Factor de seguridad FS = S<sub>y</sub> / σ<sub>vM</sub>", f"<b>{fs_txt}</b>"],
@@ -736,7 +737,7 @@ def _combination_verdict_text(check: CombinationCheck) -> tuple[Status, str]:
         "NO VERIFICA": f"{s}<sub>u</sub> &gt; {f}·S<sub>y</sub> (ELU {gov})",
         "ALERTA": f"flecha de servicio mayor a la admisible (ELS {escape(check.service_combination.name)})",
     }.get(label)
-    if label == "NO VERIFICA" and not check.stability_ok:
+    if label in ("FLUENCIA", "NO VERIFICA") and not check.stability_ok:
         stab = f"pandeo / PLT (ELU {escape(check.stability_governing[0].name)})"
         detail = stab if check.strength_ok else f"{detail}; {stab}"
     if check.strength.shear_governs:
@@ -762,10 +763,11 @@ def _section_verification_combinations(check: CombinationCheck) -> list[Flowable
         ["Combinación gobernante ELU", f"<b>{escape(check.governing.name)}</b>"],
         ["Criterio de resistencia (LRFD)", f"{s}<sub>u</sub> ≤ {f}·S<sub>y</sub>, {f} = {check.phi:g}"],
         ["Cortante máximo |V|<sub>máx</sub>", f"{check.governing_results.extreme('V').value * _KN:,.3f} kN"],
-        ["Tensión tangencial máxima τ<sub>máx</sub>", f"{check.tau_max:,.1f} MPa"],
-        ["Tensión de von Mises gobernante σ<sub>vM</sub>", f"{check.sigma_vm_max:,.1f} MPa"],
+        *_tau_rows(check.tau_max_global, check.tau_max_global_member, check.tau_max, check.strength.member),
+        [f"Tensión de von Mises en la barra crítica σ<sub>vM,u</sub> (barra {check.strength.member})",
+         f"{check.sigma_vm_max:,.1f} MPa"],
         [f"Utilización {s}<sub>u</sub> / ({f}·S<sub>y</sub>)", f"<b>{check.utilization:.0%}</b>"],
-        *_stability_rows(check.strength),
+        *_stability_rows(check.stability_governing[1], check.stability_governing[0].name),
         [f"Flecha máxima ELS {d}<sub>máx</sub> ({escape(check.service_combination.name)})",
          f"{sv.delta_max:,.2f} mm"],
         [f"Flecha relativa L/{d} (L = {sv.reference_length * _M:.3f} m)",
@@ -804,18 +806,31 @@ def _families(model: Model) -> list[str]:
     return list(dict.fromkeys(mem.section.family for mem in model.members))
 
 
-def _stability_rows(check: SafetyCheck) -> list[list[str]]:
+def _tau_rows(tau_global: float, member_global: int, tau_critical: float, member_critical: int
+              ) -> list[list[str]]:
+    """τ máx global (misma magnitud que §3.2 y el KPI de la app) y, si es otra barra, τ en la crítica."""
+    rows = [[f"Tensión tangencial máxima global τ<sub>máx</sub> (barra {member_global})",
+             f"{tau_global:,.1f} MPa"]]
+    if member_critical != member_global:
+        rows.append([f"Tensión tangencial en la barra crítica τ (barra {member_critical})",
+                     f"{tau_critical:,.1f} MPa"])
+    return rows
+
+
+def _stability_rows(check: SafetyCheck, combination: str | None = None) -> list[list[str]]:
+    """Filas de estabilidad de la barra física crítica de `check` (combinaciones: `stability_governing`)."""
     cs = check.critical_stability
     if cs is None:
         return []
     col, ltb = cs.column, cs.ltb
+    h1 = "Interacción AISC H1" + (f" (ELU {escape(combination)})" if combination else "")
     return [
         ["Esbeltez λ = K·L/r", f"{col.slenderness:.1f} (límite recomendado 200)"],
         ["Resistencia de diseño a compresión φPₙ", f"{col.phi_Pn * _KN:,.2f} kN "
          f"(Pₙ = {col.Pn * _KN:,.2f} kN)"],
         ["Momento resistente con PLT φMₙ", f"{ltb.phi_Mn * _KNM:,.2f} kN·m "
          f"(Mₙ = {ltb.Mn * _KNM:,.2f} kN·m; {escape(ltb.zone.value)})"],
-        ["Interacción AISC H1", f"<b>{cs.utilization:.0%}</b> ({escape(cs.mode)})"],
+        [h1, f"<b>{cs.utilization:.0%}</b> ({escape(cs.mode)})"],
     ]
 
 

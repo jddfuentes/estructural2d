@@ -102,6 +102,7 @@ DEFAULT_MATERIAL = "ASTM A36"
 
 
 _WEAK_SUFFIX = " (eje débil)"
+WEAK_AXIS_SUFFIX = _WEAK_SUFFIX  # sufijo que `Section.weak_axis()` agrega al nombre (público)
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +232,11 @@ class Section:
         if not (self.Iy > 0.0 and self.Cw > 0.0):
             return 0.0
         return math.sqrt(math.sqrt(self.Iy * self.Cw) / self.W)
+
+    @property
+    def base_name(self) -> str:
+        """Nombre de catálogo sin el sufijo de orientación: 'IPE 200 (eje débil)' → 'IPE 200'."""
+        return self.name.removesuffix(_WEAK_SUFFIX)
 
     def weak_axis(self, flip: bool = False) -> Section:
         """Misma sección orientada para flexionar en su eje débil dentro del plano del pórtico.
