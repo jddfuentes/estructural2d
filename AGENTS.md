@@ -157,11 +157,17 @@ Notación: fluencia **S<sub>y</sub>** (`Sy`) en mensajes, PDF y glosario; `Fx`, 
   la misma regla de estaciones que `solve`). Estándar (CIRSOC 301-2005 §A.4.2 / AISC 360-16 §B2):
   `COMB_1_4D`, `COMB_1_2D_1_6L` (ELU) y `COMB_SERVICE_D_L` = 1.0D + 1.0L (ELS).
 - Verificación por combinaciones (`check_combinations`): ELU σ_u ≤ φ·Sy con φ = 0.90 (AISC 360-16 §F1),
-  tensión elástica de primera fluencia; gobierna la combinación de máxima σ_u/(φ·Sy) (= máximo de la
-  envolvente). ELS: flecha bajo 1.0D + 1.0L **sin mayorar** contra L/N.
+  tensión elástica de primera fluencia; `governing` es **sólo** el argmax de σ_u/(φ·Sy) (= máximo de la
+  envolvente de tensiones; la estabilidad no interviene). La combinación crítica de pandeo / PLT (H1) es
+  `stability_governing`, independiente (auditoría v0.1.0, B2). ELS: flecha bajo 1.0D + 1.0L **sin mayorar**
+  contra L/N.
 - Veredicto global por combinaciones (`CombinationCheck.verdict` → `(Status, rótulo)`, fuente única para
-  UI y PDF): `FLUENCIA` (σ_u > Sy) y `NO VERIFICA` (φ·Sy < σ_u ≤ Sy) en rojo (`Status.FAIL`); `ALERTA` en
-  amarillo sólo si ELU verifica y falla la flecha ELS; `VERIFICA` en verde. La app y la búsqueda de perfil
+  UI y PDF): `FLUENCIA` si **cualquier** combinación ELU tiene σ_u > Sy (`yield_failure`) y `NO VERIFICA`
+  (φ·Sy < σ_u ≤ Sy en alguna combinación, `strength_failure`, o estabilidad que no verifica) en rojo
+  (`Status.FAIL`); `ALERTA` en amarillo sólo si ELU verifica y falla la flecha ELS; `VERIFICA` en verde.
+  `CombinationCheck.status` es la severidad del veredicto (`verdict[0]`). `issues` trae un mensaje por
+  combinación y criterio que falla (resistencia: la gobernante primero; estabilidad: la de
+  `stability_governing`) y luego el de servicio. La app y la búsqueda de perfil
   (`suggest_section(..., phi=...)`) usan este mismo criterio; el PDF documenta ELU con la combinación
   gobernante (cargas mayoradas) y la deformación (§3.3) sólo con 1.0D + 1.0L.
 - `Results.extreme`: máximo de |valor|; magnitudes que difieren < 1e-12 (relativo, `_TIE_RTOL`) empatan y
@@ -221,7 +227,16 @@ core.verification.member_stresses(section, member_result) -> MemberStresses  # �
 core.verification.weak_axis_bending_stress(section, M_y) -> float  # |M_y| / W_y [MPa]
 core.verification.SafetyCheck: .tau_max, .sigma_vm_max, .shear_governs  # de la barra crítica;
                                # .sigma_max sigue siendo la tensión NORMAL máx; .fs y .utilization usan σ_vM
-core.verification.CombinationCheck: .tau_max, .sigma_vm_max   # de la combinación gobernante
+core.verification.CombinationCheck: .tau_max, .sigma_vm_max   # barra crítica de la combinación gobernante
+# ---- τ / σ_vM máximas globales (auditoría v0.1.0, B4): UNA magnitud para app KPI, PDF §3.2 y §4 ----
+core.verification.stress_maxima(model, results) -> StressMaxima(tau_max, tau_member, sigma_vm_max,
+                                                                sigma_vm_member)  # todas las barras
+core.verification.SafetyCheck(..., tau_max_global=0, tau_max_global_member=0, sigma_vm_max_global=0,
+                              sigma_vm_max_global_member=0)  # al final; de `stress_maxima`
+core.verification.CombinationCheck: .tau_max_global, .tau_max_global_member, .sigma_vm_max_global,
+                                    .sigma_vm_max_global_member   # de la combinación gobernante
+core.verification.CombinationCheck: .yield_failure, .strength_failure   # en CUALQUIER combinación ELU
+core.materials.Section.base_name -> str; WEAK_AXIS_SUFFIX = " (eje débil)"  # nombre de catálogo sin sufijo
 # ---- Estabilidad (backlog 3, AISC 360-16 = CIRSOC 301-2005) ----
 core.materials.Section(..., Z=0, Z_y=0, J=0, Cw=0, h0=0)   # al final [mm³, mm³, mm⁴, mm⁶, mm]; Z = 2·Q auto
 core.materials.Section.r_x, .r_y, .r_min, .r_ts [mm]; .has_ltb_data   # r_x: eje de flexión (I)
@@ -272,7 +287,9 @@ L/N (estado límite de servicio, sin fluencia); `OK` sólo si verifican resisten
 Con `stability=True`: `FLUENCIA` (severidad) también si una barra física es inestable con resistencias
 nominales (utilización H1 nominal > 1; `issues` dice "Inestabilidad…" y el PDF "INESTABILIDAD"); `ALERTA` si
 la utilización H1 con Pn/FS_min, Mn/FS_min supera 1. En combinaciones, Pu/Mu frente a φPn/φMn: no verificar
-da `verdict = (FAIL, "NO VERIFICA")`. `strength_ok` sigue siendo **sólo** tensiones de la sección;
+da `verdict = (FAIL, "NO VERIFICA")` (y `status = FAIL`), salvo que alguna combinación fluya (`FLUENCIA`).
+La memoria (§1 y §4) y el KPI de estabilidad de la app leen `stability_governing`. `strength_ok` sigue
+siendo **sólo** tensiones de la sección (de la combinación gobernante);
 `stability_ok` / `uls_ok` incluyen la estabilidad. Sin `stability=True` el resultado es idéntico al anterior.
 `deflection_limit_ratio = 0` desactiva el control de flecha. L por defecto: ancho horizontal del
 modelo (`default_reference_length`). `max_deflection` [mm] de `suggest_section`, si se da,
@@ -293,6 +310,8 @@ Mensajes en castellano y accionables (la UI los muestra tal cual).
 - Sin estado global mutable, sin cachés ocultas en `core/`. Si hace falta cachear, se hace
   en la UI (`st.cache_data`): `app.py` cachea análisis, PNG, PDF y sugerencia con clave `repr(model)`
   (+ parámetros), y resuelve D/L una sola vez por cambio de modelo (`check_combinations(case_results=…)`).
+  Todo argumento con `_` (no hasheado, p. ej. `_chk`) obliga a que la clave incluya **todos** los parámetros
+  que lo cambian: el PDF usa `_pdf_key` = modelo | L/N | escala | estabilidad | K | Lb (auditoría v0.1.0, B3).
 - Docstrings y mensajes al usuario en **castellano**; identificadores en inglés.
 - Cada constante normativa/tabla lleva comentario con su fuente (norma, catálogo).
 - Línea máx. 110 caracteres. Sin dependencias nuevas sin justificar en el PR/commit.
@@ -393,8 +412,11 @@ Backlog priorizado (no implementar sin tarea explícita):
 5. ~~Flexión en eje débil y secciones asimétricas~~ → **core completado**: `Section.Iy/Wy/c_y1/c_y2/Q_y/t_y`
    (IPE/W geometría; IPN/UPN Iy y e de tabla; C conformado exacto), `Section.weak_axis()`,
    `weak_axis_bending_stress`, `W_top/W_bot`. `suggest_section(lambda s: build(s.weak_axis()), ...)` ya
-   busca el perfil en eje débil. **Pendiente Frontend**: selector "eje fuerte / eje débil (invertido)" en
-   `ui/inputs.py`. Fuera de alcance: flexión esviada combinada (M_z + M_y en una misma sección).
+   busca el perfil en eje débil. UI: selector "Eje fuerte / Eje débil / Eje débil (invertido)" (el invertido
+   sólo en secciones con c_y1 ≠ c_y2); `AppInputs.is_weak_axis` y `.flip` guardan la orientación y la
+   búsqueda de perfil de la app la reaplica a cada candidato (`lambda s: builder(s.weak_axis(flip))`) y
+   compara por `Section.base_name` (auditoría v0.1.0, B1). Pendiente: el nombre no distingue el invertido.
+   Fuera de alcance: flexión esviada combinada (M_z + M_y en una misma sección).
 6. ~~Pórticos genéricos y cargas térmicas~~ → **core completado**: `Material.alpha`, `ThermalLoad` (ΔT uniforme +
    deformación axial impuesta `strain`), `Model.thermal_loads`, término térmico en `solve` (f_eq axial,
    N = N_cin − EAα·ΔT, elástica u' = N/EA + ε₀), integrado a hipótesis D/L y combinaciones, y `build_frame`
@@ -404,6 +426,10 @@ Backlog priorizado (no implementar sin tarea explícita):
    ΔT por barra con hipótesis en `ui/inputs.py`; símbolo de ΔT en `ui/plots.py` y en el esquema/tabla de cargas
    de `core/reports.py` (hoy el PDF **no lista** las cargas térmicas); α y ΔT en `core/glossary.py`.
    Fuera de alcance: gradiente térmico en la altura (curvatura impuesta), apoyos móviles inclinados.
+   Editor de nodos del pórtico genérico (`ui/inputs.py`): sin columna "Nodo"; el número de nodo es la
+   **posición de la fila** (= índice del modelo, el que dibujan los gráficos y el PDF). Sólo se ignoran
+   filas vacías al final; una fila intermedia incompleta da `ValueError` (descartarla renumeraría los
+   nodos siguientes y desconectaría las barras). Auditoría v0.1.0, B5.
 7. ~~Reporte PDF de memoria de cálculo~~ → hecho (`core/reports.py`), con esquema de cargas,
    deformada, diagramas N-V-M-σ vectoriales, convenciones de signo y glosario/simbología (§6 del PDF).
    Si se cambia un gráfico de `ui/plots.py`, revisar que el equivalente del PDF siga la misma
