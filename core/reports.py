@@ -525,7 +525,23 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
         out.append(_table(["Origen", "Barras", "Hipótesis", span_head, "Dirección",
                            "q ini [kN/m]", "q fin [kN/m]"],
                           rows, [0.12, 0.08, 0.12, 0.25, 0.16, 0.14, 0.13], num_cols={5, 6}))
-    if not model.nodal_loads and not groups:
+    if model.thermal_loads:
+        out.append(Spacer(1, 2 * mm))
+        out.append(_p("<b>Cargas térmicas uniformes</b>", "body"))
+        rows = []
+        for thermal in model.thermal_loads:
+            mem = model.members[thermal.member]
+            eps = mem.material.alpha * thermal.delta_t + thermal.strain
+            rows.append([
+                str(thermal.member), _CASE_TXT[thermal.case], _num(thermal.delta_t),
+                f"{eps:.6g}", f"{thermal.strain:.6g}",
+            ])
+        out.append(_table(
+            ["Barra", "Hipótesis", "ΔT [°C]", "ε<sub>0</sub> = α·ΔT + strain [-]",
+             "strain impuesta [-]"],
+            rows, [0.12, 0.16, 0.18, 0.34, 0.20], num_cols={2, 3, 4},
+        ))
+    if not model.nodal_loads and not groups and not model.thermal_loads:
         out.append(_p("Sin cargas aplicadas.", "body"))
 
     # 2.4 Materiales y secciones
@@ -535,11 +551,13 @@ def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
     for mem in model.members:
         mats.setdefault(mem.material.name, mem.material)
         secs.setdefault((mem.section.name, mem.material.name), (mem.section, mem.material))
-    rows = [[escape(m.name), f"{m.E:,.0f}", f"{m.Sy:g}", f"{m.Su:g}", f"{m.nu:g}", f"{m.rho:,.0f}"]
+    rows = [[escape(m.name), f"{m.E:,.0f}", f"{m.Sy:g}", f"{m.Su:g}", f"{m.nu:g}",
+             f"{m.rho:,.0f}", f"{m.alpha * 1e6:g}"]
             for m in mats.values()]
     out.append(_table(["Material", "E [MPa]", "Sy [MPa]", "Su [MPa]", f"{_g('n')} [-]",
-                       f"{_g('r')} [kg/m{_sup(3)}]"],
-                      rows, [0.30, 0.15, 0.13, 0.13, 0.12, 0.17], num_cols={1, 2, 3, 4, 5}))
+                       f"{_g('r')} [kg/m{_sup(3)}]", "α [10⁻⁶/°C]"],
+                      rows, [0.26, 0.13, 0.11, 0.11, 0.10, 0.15, 0.14],
+                      num_cols={1, 2, 3, 4, 5, 6}))
     out.append(Spacer(1, 2 * mm))
     rows = [[escape(s.name), "Eje débil" if s.name.endswith("(eje débil)") else "Eje fuerte",
               f"{s.h:g}", f"{s.A * _CM2:,.2f}", f"{s.I * _CM4:,.1f}", f"{s.W * _CM3:,.1f}",
@@ -576,8 +594,13 @@ def _section_results(model: Model, results: Results, L_ref: float, figs: _Figure
         deflection_results = combo.service_results
         head.append(_p(f"Reacciones, solicitaciones y diagramas (3.1 y 3.2): combinación ELU gobernante "
                        f"<b>{escape(comb.name)}</b>, cargas mayoradas. Deformación (3.3): combinación de "
-                       f"servicio <b>{escape(combo.service_combination.name)}</b>, cargas sin mayorar.",
+                       f"servicio <b>{escape(combo.service_combination.name)}</b>, cargas sin mayorar. "
+                       "Los axiles incluyen el término térmico inicial "
+                       "<b>−E·A·α·ΔT</b> y la deformación impuesta.",
                        "note"))
+    elif model.thermal_loads:
+        head.append(_p("Los axiles de las barras incluyen el término térmico inicial "
+                       "<b>−E·A·α·ΔT</b> y la deformación impuesta ε₀.", "note"))
 
     # 3.1 Reacciones + equilibrio global
     rows, sx, sy = [], 0.0, 0.0

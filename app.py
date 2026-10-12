@@ -194,6 +194,11 @@ def main() -> None:
                    "(von Mises), no por flexión pura.")
     for issue in chk.issues:
         st.warning(f"Servicio: {issue[4:]}" if issue.startswith("ELS ") else issue)
+    if model.thermal_loads:
+        st.info(
+            "El análisis incluye cargas térmicas uniformes: ΔT > 0 dilata y, si existe coacción axial, "
+            "genera N < 0 (compresión)."
+        )
 
     # ---- Memoria ---------------------------------------------------------- #
     with st.expander("Memoria de cálculo (PDF)"):
@@ -238,6 +243,8 @@ def main() -> None:
         if abs(N.value) < 1e-6:
             st.info("Esfuerzo normal nulo en toda la estructura.")
         st.plotly_chart(plot_diagram(model, diagram_results, "N"), width="stretch")
+        if model.thermal_loads:
+            st.caption("El axil térmico inicial −E·A·α·ΔT se informa con N < 0 en compresión.")
     with tabs[4]:
         st.plotly_chart(plot_diagram(model, diagram_results, "sigma"), width="stretch")
         st.caption("σ = N/A ± M·c/I en fibra extrema; es la tensión normal, sin combinar con τ.")

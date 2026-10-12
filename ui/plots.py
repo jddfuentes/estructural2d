@@ -142,6 +142,7 @@ def plot_structure(
         legend: set[LoadCase] = set()  # una sola entrada de leyenda por hipótesis
         _draw_distributed_loads(fig, model, ext, legend)
         _draw_point_loads(fig, model, ext, legend)
+        _draw_thermal_loads(fig, model, ext, legend)
         if any(d.label == SELF_WEIGHT for d in model.distributed_loads):
             fig.add_annotation(xref="paper", yref="paper", x=0.0, y=0.0, xanchor="left", yanchor="bottom",
                                text="+ peso propio (no dibujado)", showarrow=False,
@@ -535,6 +536,24 @@ def _draw_deformed(fig: go.Figure, model: Model, results: Results, ext: float,
         ))
 
 
+def _draw_thermal_loads(fig: go.Figure, model: Model, ext: float, legend: set[LoadCase]) -> None:
+    for load in model.thermal_loads:
+        if load.delta_t == 0.0 and load.strain == 0.0:
+            continue
+        _legend_case(fig, load.case, legend)
+        mem = model.members[load.member]
+        (x1, y1), (x2, y2) = model.nodes[mem.i], model.nodes[mem.j]
+        color = "#DC2626" if load.delta_t > 0 else "#2563EB"
+        text = f"ΔT = {load.delta_t:+.3g} °C [{load.case.value}]"
+        if load.strain:
+            text += f"<br>ε₀ imp. = {load.strain:+.3g}"
+        fig.add_annotation(
+            x=((x1 + x2) / 2) * M_TO, y=((y1 + y2) / 2) * M_TO,
+            text=text, showarrow=False, font=dict(color=color, size=11),
+            bgcolor="rgba(255,255,255,0.88)", bordercolor=color, borderwidth=1,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Diagramas de solicitaciones
 # --------------------------------------------------------------------------- #
@@ -583,6 +602,8 @@ def _beam_diagram(model: Model, results: Results, q: str, tension_side: bool) ->
     fig.update_yaxes(title_text=f"{q} [{spec.unit}]")
     if q == "M" and tension_side:
         fig.update_yaxes(autorange="reversed", title_text="M [kN·m] (+ abajo: tracción inferior)")
+    if q == "N" and model.thermal_loads:
+        fig.update_layout(title=f"{spec.title} [{spec.unit}] · térmico: N < 0 compresión")
     return fig
 
 

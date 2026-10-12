@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from core.builders import BeamSupport, build_beam
+from core.builders import BeamSupport, build_beam, build_frame
 from core.materials import Material, custom
-from core.model import SupportType
+from core.model import Member, Support, SupportType, ThermalLoad
 from core.solver import solve
 from ui.plots import plot_diagram, plot_structure
 
@@ -64,3 +64,19 @@ def test_stress_diagrams_render_shear_and_von_mises() -> None:
         figure = plot_diagram(model, results, quantity)
         assert title in figure.layout.title.text
         assert len(figure.data) > 0
+
+
+def test_thermal_load_is_annotated_and_normal_diagram_is_explicit() -> None:
+    material = Material("test", E=200_000.0, Sy=250.0, Su=400.0)
+    section = custom("test", A=3_000.0, I=2.0e7, c=100.0)
+    model = build_frame(
+        [(0.0, 0.0), (6_000.0, 0.0)],
+        [Member(0, 1, section, material)],
+        [Support(0, SupportType.FIXED), Support(1, SupportType.FREE)],
+        thermal_loads=[ThermalLoad(0, 20.0)],
+    )
+    results = solve(model)
+    structure = plot_structure(model, results)
+    assert any("ΔT = +20" in (annotation.text or "") for annotation in structure.layout.annotations)
+    normal = plot_diagram(model, results, "N")
+    assert "térmico" in normal.layout.title.text

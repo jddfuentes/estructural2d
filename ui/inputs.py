@@ -14,7 +14,14 @@ from typing import Any, Literal
 import pandas as pd
 import streamlit as st
 
-from core.builders import BeamDistLoad, BeamPointLoad, BeamSupport, build_beam, build_portal_frame
+from core.builders import (
+    BeamDistLoad,
+    BeamPointLoad,
+    BeamSupport,
+    build_beam,
+    build_frame,
+    build_portal_frame,
+)
 from core.materials import (
     DEFAULT_MATERIAL,
     DEFAULT_SECTION,
@@ -26,7 +33,16 @@ from core.materials import (
     custom,
     family_warnings,
 )
-from core.model import LoadCase, Model, Spring, SupportType
+from core.model import (
+    LoadCase,
+    Member,
+    Model,
+    NodalLoad,
+    Spring,
+    Support,
+    SupportType,
+    ThermalLoad,
+)
 
 M = 1e3  # m -> mm
 KN = 1e3  # kN -> N
@@ -173,11 +189,114 @@ def _apply_member_releases(model: Model, releases: pd.DataFrame) -> Model:
     return model
 
 
+def _thermal_editor(labels: list[str], key: str, default_member: int = 0) -> pd.DataFrame:
+    """Editor de ΔT y deformación axial impuesta por barra."""
+    return _editor(
+        pd.DataFrame({
+            "Barra": list(range(len(labels))),
+            "Referencia": labels,
+            "ΔT [°C]": [0.0] * len(labels),
+            "Hipótesis": [LoadCase.DEAD.value] * len(labels),
+            "strain [-]": [0.0] * len(labels),
+        }),
+        f"{key}_{len(labels)}",
+        {
+            "Barra": st.column_config.NumberColumn(disabled=True),
+            "Referencia": st.column_config.TextColumn(disabled=True),
+            "ΔT [°C]": st.column_config.NumberColumn(step=1.0, format="%.2f"),
+            "Hipótesis": st.column_config.SelectboxColumn(options=["D", "L"], default="D"),
+            "strain [-]": st.column_config.NumberColumn(step=1e-5, format="%.6g"),
+        },
+        num_rows="fixed",
+    )
+
+
+def _thermal_loads(df: pd.DataFrame) -> list[ThermalLoad]:
+    return [
+        ThermalLoad(
+            int(row["Barra"]),
+            float(row["ΔT [°C]"]),
+            case=LoadCase(str(row["Hipótesis"])),
+            strain=float(row["strain [-]"]),
+        )
+        for _, row in df.iterrows()
+        if float(row["ΔT [°C]"]) != 0.0 or float(row["strain [-]"]) != 0.0
+    ]
+
+
+def _generic_frame_inputs(
+    material: Material, section: Section, self_weight: bool
+) -> tuple[Callable[[Section], Model], float]:
+    """Editor mínimo de nodos, barras, apoyos y cargas para una topología libre."""
+    st.markdown("**Nodos**")
+    nodes_df = _editor(
+        pd.DataFrame({"Nodo": [0, 1, 2, 3], "x [m]": [0.0, 0.0, 8.0, 8.0],
+                      "y [m]": [0.0, 4.0, 4.0, 0.0]}),
+        "generic_nodes",
+        {"Nodo": st.column_config.NumberColumn(disabled=True),
+         "x [m]": st.column_config.NumberColumn(step=0.1),
+         "y [m]": st.column_config.NumberColumn(step=0.1)},
+        num_rows="dynamic",
+    )
+    st.markdown("**Barras**")
+    members_df = _editor(
+        pd.DataFrame({"i": [0, 1, 2], "j": [1, 2, 3], "Rótula inicio": [False] * 3,
+                      "Rótula fin": [False] * 3}),
+        "generic_members",
+        {"i": st.column_config.NumberColumn(min_value=0, step=1),
+         "j": st.column_config.NumberColumn(min_value=0, step=1),
+         "Rótula inicio": st.column_config.CheckboxColumn(default=False),
+         "Rótula fin": st.column_config.CheckboxColumn(default=False)},
+        num_rows="dynamic",
+    )
+    st.markdown("**Apoyos**")
+    supports_df = _editor(
+        pd.DataFrame({"Nodo": [0, 3], "Tipo": [SupportType.PINNED.value, SupportType.ROLLER.value]}),
+        "generic_supports",
+        {"Nodo": st.column_config.NumberColumn(min_value=0, step=1),
+         "Tipo": st.column_config.SelectboxColumn(options=list(SUPPORT_LABELS), required=True)},
+        num_rows="dynamic",
+    )
+    nodal_df = _editor(
+        pd.DataFrame({"Nodo": [1], "Fx [kN]": [0.0], "Fy [kN] ↓": [10.0],
+                      "Mz [kN·m]": [0.0], "Hipótesis": [LoadCase.DEAD.value]}),
+        "generic_nodal_loads",
+        {"Nodo": st.column_config.NumberColumn(min_value=0, step=1),
+         "Hipótesis": st.column_config.SelectboxColumn(options=["D", "L"], default="D")},
+        num_rows="dynamic",
+    )
+    thermal_df = _thermal_editor([f"Barra {i}" for i in range(len(members_df))],
+                                 "generic_thermal_loads")
+    span = max(float(nodes_df["x [m]"].max()) - float(nodes_df["x [m]"].min()), 0.1) * M
+
+    def builder(sec: Section) -> Model:
+        points = [(float(r["x [m]"]) * M, float(r["y [m]"]) * M)
+                  for _, r in nodes_df.iterrows()]
+        members = [
+            Member(int(r["i"]), int(r["j"]), sec, material, bool(r["Rótula inicio"]),
+                   bool(r["Rótula fin"]))
+            for _, r in members_df.iterrows()
+        ]
+        supports = [Support(int(r["Nodo"]), SUPPORT_LABELS[str(r["Tipo"])])
+                     for _, r in supports_df.iterrows()]
+        nodal = [
+            NodalLoad(int(r["Nodo"]), Fx=float(r["Fx [kN]"]) * KN,
+                      Fy=-float(r["Fy [kN] ↓"]) * KN, Mz=float(r["Mz [kN·m]"]) * KNM,
+                      case=LoadCase(str(r["Hipótesis"])))
+            for _, r in nodal_df.iterrows()
+            if any(float(r[c]) != 0.0 for c in ("Fx [kN]", "Fy [kN] ↓", "Mz [kN·m]"))
+        ]
+        return build_frame(points, members, supports, nodal_loads=nodal,
+                           thermal_loads=_thermal_loads(thermal_df), self_weight=self_weight)
+
+    return builder, span
+
+
 def sidebar() -> AppInputs:
     sb = st.sidebar
     with sb:
         st.header("Modelo")
-        kind = st.radio("Tipo de estructura", ["Viga", "Pórtico"], horizontal=True)
+        kind = st.radio("Tipo de estructura", ["Viga", "Pórtico", "Pórtico genérico"], horizontal=True)
 
         st.subheader("Material y sección")
         mat_names = list(MATERIALS)
@@ -190,7 +309,9 @@ def sidebar() -> AppInputs:
         st.subheader("Geometría y cargas")
         st.caption("Cargas: **+ hacia abajo** · momentos **+ antihorario** · "
                    "horizontales **+ hacia la derecha**")
-        if column_section is None:
+        if kind == "Pórtico genérico":
+            builder, span = _generic_frame_inputs(material, section, self_weight)
+        elif column_section is None:
             builder, span = _beam_inputs(material, self_weight)
         else:
             builder, span = _portal_inputs(material, column_section, self_weight)
@@ -289,12 +410,14 @@ def _beam_inputs(material: Material, self_weight: bool) -> tuple[Callable[[Secti
     # Una fila por barra del modelo que realmente se arma (mismos nodos que `build_beam`)
     preview = build_beam(L * M, supports, _GEOMETRY_ONLY, material, point_loads, dist_loads, False)
     release_df = _member_release_editor(_member_labels(preview), "beam_member_releases")
+    thermal_df = _thermal_editor(_member_labels(preview), "beam_thermal_loads")
 
     def builder(sec: Section) -> Model:
         model = build_beam(L * M, supports, sec, material, point_loads, dist_loads, self_weight)
         for x, spring in spring_inputs:
             node = min(range(len(model.nodes)), key=lambda i: abs(model.nodes[i][0] - x))
             model.springs.append(replace(spring, node=node))
+        model.thermal_loads = _thermal_loads(thermal_df)
         return _apply_member_releases(model, release_df)
 
     return builder, L * M
@@ -347,6 +470,8 @@ def _portal_inputs(material: Material, column: Section, self_weight: bool
     # Una fila por barra real: las cargas puntuales parten la viga en más barras
     preview = frame(_GEOMETRY_ONLY, _GEOMETRY_ONLY, False)
     release_df = _member_release_editor(_member_labels(preview), "portal_member_releases")
+    thermal_df = _thermal_editor(_member_labels(preview), "portal_thermal_loads",
+                                 default_member=1 if len(preview.members) > 2 else 0)
     base_right_node = len(preview.nodes) - 1  # la base derecha es siempre el último nodo
     springs = [
         sp for sp in (
@@ -359,6 +484,7 @@ def _portal_inputs(material: Material, column: Section, self_weight: bool
     def builder(sec: Section) -> Model:
         model = frame(sec, column, self_weight)
         model.springs.extend(springs)
+        model.thermal_loads = _thermal_loads(thermal_df)
         return _apply_member_releases(model, release_df)
 
     return builder, span * M

@@ -95,6 +95,15 @@ NOTATION: tuple[Group, ...] = (
         ),
     ),
     Group(
+        "Acciones térmicas",
+        (
+            Entry("α", "Coeficiente de dilatación térmica lineal del material.", "1/°C"),
+            Entry("ΔT", "Variación uniforme de temperatura; ΔT > 0 indica calentamiento.", "°C"),
+            Entry("ε_{0}, ε_{th}", "Deformación axial libre impuesta: ε₀ = α·ΔT + strain.", "—"),
+            Entry("N_{th}", "Esfuerzo axil de fijación térmica: E·A·α·ΔT.", "kN"),
+        ),
+    ),
+    Group(
         "Hipótesis y combinaciones",
         (
             Entry("D; L (hipótesis)", "D: cargas permanentes (peso propio, terminaciones, equipos fijos). "

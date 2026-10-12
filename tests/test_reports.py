@@ -9,8 +9,16 @@ from dataclasses import replace
 
 import pytest
 
-from core.builders import BeamDistLoad, BeamPointLoad, BeamSupport, build_beam, build_portal_frame
+from core.builders import (
+    BeamDistLoad,
+    BeamPointLoad,
+    BeamSupport,
+    build_beam,
+    build_frame,
+    build_portal_frame,
+)
 from core.materials import MATERIALS, get_section
+from core.model import Member, Support, ThermalLoad
 from core.model import SupportType as ST
 from core.reports import build_pdf_report
 from core.solver import solve
@@ -71,6 +79,25 @@ def test_returns_valid_pdf_bytes():
     pdf = build_pdf_report(m, r, c, "Viga de prueba", "J. Fuentes", date=DATE)
     assert isinstance(pdf, bytes)
     assert pdf.startswith(b"%PDF")
+
+
+def test_report_with_thermal_load_documents_alpha_delta_t_and_axial_term():
+    """Una carga térmica activa aparece en entradas, material y resultados del PDF."""
+    section = get_section("IPE 200")
+    m = build_frame(
+        [(0.0, 0.0), (6000.0, 0.0)],
+        [Member(0, 1, section, MAT)],
+        [Support(0, ST.FIXED), Support(1, ST.FREE)],
+        thermal_loads=[ThermalLoad(0, 35.0, strain=1e-4)],
+    )
+    r = solve(m)
+    c = check_safety(m, r, deflection_limit_ratio=0.0)
+    pdf = build_pdf_report(m, r, c, date=DATE, include_figures=False)
+    assert pdf.startswith(b"%PDF")
+    text = _flat(_text(pdf))
+    assert "Cargas térmicas uniformes" in text
+    assert "35.00" in text and "α" in text
+    assert "−E·A·α·ΔT" in text
 
 
 def test_stability_report_contains_buckling_rows():
