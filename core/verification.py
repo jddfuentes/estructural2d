@@ -135,6 +135,34 @@ class MemberStresses:
     sigma_vm: FloatArray  # máx(σ_vM,flex, σ_vM,corte): tensión equivalente gobernante
 
 
+@dataclass(frozen=True, slots=True)
+class StressMaxima:
+    """Máximos de τ y σ_vM sobre TODAS las barras de un `Results` [MPa] y la barra donde ocurren.
+
+    Fuente única de "τ máx global" / "σ_vM máx global" para `SafetyCheck`, la app y la memoria PDF
+    (§3.2 y §4). Empate: gana la primera barra (orden de `results.members`).
+    """
+
+    tau_max: float  # τ máxima de la estructura
+    tau_member: int  # barra de τ máxima
+    sigma_vm_max: float  # σ_vM máxima de la estructura
+    sigma_vm_member: int  # barra de σ_vM máxima
+
+
+def stress_maxima(model: Model, results: Results) -> StressMaxima:
+    """τ y σ_vM máximas de toda la estructura (no sólo de la barra crítica de menor FS)."""
+    tau_max = vm_max = 0.0
+    tau_member = vm_member = results.members[0].member if results.members else 0
+    for mr in results.members:
+        st = member_stresses(model.members[mr.member].section, mr)
+        tau, vm = float(np.max(st.tau)), float(np.max(st.sigma_vm))
+        if tau > tau_max:
+            tau_max, tau_member = tau, mr.member
+        if vm > vm_max:
+            vm_max, vm_member = vm, mr.member
+    return StressMaxima(tau_max, tau_member, vm_max, vm_member)
+
+
 def member_stresses(section: Section, mr: MemberResult) -> MemberStresses:
     """σ normales, τ de corte y von Mises en cada estación de la barra (ver docstring del módulo).
 
@@ -590,6 +618,11 @@ class SafetyCheck:
     sigma_vm_max: float = 0.0  # σ_vM máxima de la barra crítica [MPa]; FS = Sy / σ_vM
     # ---- Estabilidad (pandeo / PLT) — agregado al final (AGENTS.md §5) ---- #
     stability: tuple[MemberStabilityCheck, ...] = ()  # una por barra física; () = no evaluada
+    # ---- Máximos globales (todas las barras) — agregados al final (AGENTS.md §5) ---- #
+    tau_max_global: float = 0.0  # τ máxima de toda la estructura [MPa] (`stress_maxima`)
+    tau_max_global_member: int = 0  # barra de τ máxima global
+    sigma_vm_max_global: float = 0.0  # σ_vM máxima de toda la estructura [MPa]
+    sigma_vm_max_global_member: int = 0  # barra de σ_vM máxima global
 
     @property
     def critical_stability(self) -> MemberStabilityCheck | None:
@@ -768,6 +801,7 @@ def check_safety(
     else:
         status = Status.OK
 
+    glob = stress_maxima(model, results)
     return SafetyCheck(
         fs=fs, fs_min=fs_min, sigma_max=smax, sy=sy, member=mr.member,
         x=float(mr.x[k]), point=(float(mr.points[k, 0]), float(mr.points[k, 1])),
@@ -775,6 +809,8 @@ def check_safety(
         delta_max=delta, deflection_ratio=ratio, deflection_limit_ratio=deflection_limit_ratio,
         deflection_ok=deflection_ok, reference_length=L_ref,
         tau_max=float(np.max(st.tau)), sigma_vm_max=svm, stability=stab,
+        tau_max_global=glob.tau_max, tau_max_global_member=glob.tau_member,
+        sigma_vm_max_global=glob.sigma_vm_max, sigma_vm_max_global_member=glob.sigma_vm_member,
     )
 
 
@@ -788,7 +824,9 @@ class CombinationCheck:
 
     phi: float  # factor de resistencia φ
     strength_checks: tuple[tuple[LoadCombination, SafetyCheck], ...]  # una por combinación ELU
-    governing: LoadCombination  # combinación ELU de máxima utilización (gobierna resistencia)
+    # combinación ELU de máxima utilización POR TENSIONES σ_u/(φ·Sy) (máximo de la envolvente); la de
+    # estabilidad (H1) es `stability_governing`, independiente de ésta
+    governing: LoadCombination
     service_combination: LoadCombination  # combinación de servicio (cargas sin mayorar)
     service_check: SafetyCheck  # flecha bajo `service_combination`
     governing_results: Results  # solicitaciones mayoradas de la combinación gobernante
@@ -812,12 +850,32 @@ class CombinationCheck:
 
     @property
     def tau_max(self) -> float:
-        """τ máxima [MPa] en la barra crítica de la combinación gobernante (cargas mayoradas)."""
+        """τ máxima [MPa] en la BARRA CRÍTICA (menor FS) de la combinación gobernante (cargas mayoradas)."""
         return self.strength.tau_max
 
     @property
+    def tau_max_global(self) -> float:
+        """τ máxima [MPa] de TODA la estructura en la combinación gobernante (app KPI, PDF §3.2 y §4)."""
+        return self.strength.tau_max_global
+
+    @property
+    def tau_max_global_member(self) -> int:
+        """Barra de τ máxima global en la combinación gobernante."""
+        return self.strength.tau_max_global_member
+
+    @property
+    def sigma_vm_max_global(self) -> float:
+        """σ_vM máxima [MPa] de TODA la estructura en la combinación gobernante."""
+        return self.strength.sigma_vm_max_global
+
+    @property
+    def sigma_vm_max_global_member(self) -> int:
+        """Barra de σ_vM máxima global en la combinación gobernante."""
+        return self.strength.sigma_vm_max_global_member
+
+    @property
     def sigma_vm_max(self) -> float:
-        """σ_vM máxima [MPa] de la combinación gobernante; ELU verifica si σ_vM ≤ φ·Sy."""
+        """σ_vM máxima [MPa] de la barra crítica de la combinación gobernante; ELU verifica si σ_vM ≤ φ·Sy."""
         return self.strength.sigma_vm_max
 
     @property
@@ -841,8 +899,18 @@ class CombinationCheck:
 
     @property
     def stability_governs(self) -> bool:
-        """En la combinación gobernante, la inestabilidad supera a la utilización por tensiones."""
-        return self.strength.stability_governs
+        """La utilización H1 (`stability_governing`) supera a la de tensiones (`governing`)."""
+        return self.stability_utilization > self.utilization
+
+    @property
+    def yield_failure(self) -> bool:
+        """Alguna combinación ELU tiene σ_u > Sy (FS < 1): fluencia."""
+        return any(chk.fs < 1.0 for _, chk in self.strength_checks)
+
+    @property
+    def strength_failure(self) -> bool:
+        """Alguna combinación ELU tiene σ_u > φ·Sy (no verifica resistencia de la sección)."""
+        return any(not chk.strength_ok for _, chk in self.strength_checks)
 
     @property
     def delta_max(self) -> float:
@@ -855,11 +923,12 @@ class CombinationCheck:
 
     @property
     def status(self) -> Status:
-        """FLUENCIA si σ_u > Sy; ALERTA si σ_u > φ·Sy, la estabilidad no verifica o la flecha de servicio
-        excede L/N; si no, OK."""
-        if self.strength.fs < 1.0:
+        """Severidad global (= `verdict[0]`): FAIL si en CUALQUIER combinación ELU σ_u > φ·Sy (incluye la
+        fluencia σ_u > Sy) o la estabilidad no verifica; ALERTA si sólo excede la flecha de servicio L/N;
+        si no, OK. No depende de qué combinación gobierne la estabilidad."""
+        if self.strength_failure or not self.stability_ok:
             return Status.FAIL
-        if not self.strength_ok or not self.stability_ok or not self.deflection_ok:
+        if not self.deflection_ok:
             return Status.ALERT
         return Status.OK
 
@@ -871,16 +940,16 @@ class CombinationCheck:
     def verdict(self) -> tuple[Status, str]:
         """Veredicto global para mostrar (UI y PDF): (severidad, rótulo).
 
-        - (FAIL, "FLUENCIA"): σ_u > Sy en la combinación gobernante.
+        - (FAIL, "FLUENCIA"): σ_u > Sy en alguna combinación ELU (aunque otra gobierne la estabilidad).
         - (FAIL, "NO VERIFICA"): φ·Sy < σ_u ≤ Sy, o la estabilidad no verifica (Pu, Mu frente a φPn, φMn,
           AISC H1); en LRFD no verificar ELU es una falla, no una alerta.
         - (ALERT, "ALERTA"): ELU verifica pero la flecha de servicio supera L/N.
         - (OK, "VERIFICA"): verifican ELU y ELS.
-        La severidad sólo elige el color; el detalle se lee de `issues`.
+        La severidad sólo elige el color; el detalle (combinación y criterio) se lee de `issues`.
         """
-        if self.status is Status.FAIL:
+        if self.yield_failure:
             return Status.FAIL, "FLUENCIA"
-        if not self.strength_ok or not self.stability_ok:
+        if self.strength_failure or not self.stability_ok:
             return Status.FAIL, "NO VERIFICA"
         if not self.deflection_ok:
             return Status.ALERT, "ALERTA"
@@ -888,16 +957,19 @@ class CombinationCheck:
 
     @property
     def issues(self) -> tuple[str, ...]:
-        """Motivos de un veredicto no-OK, en castellano e indicando la combinación."""
+        """Motivos de un veredicto no-OK, en castellano: un mensaje por combinación ELU y criterio que falla
+        (resistencia: fluencia o σ_u > φ·Sy, la gobernante primero; estabilidad: la combinación crítica
+        de H1) y luego el de servicio."""
         out: list[str] = []
-        st, name = self.strength, self.governing.name
-        where = _where(st.member, st.point)
-        if st.fs < 1.0:
-            out.append(f"ELU {name}: {st._stress_text('u')} supera Sy = {st.sy:g} MPa "
-                       f"(fluencia) en {where}.")
-        elif not st.strength_ok:
-            out.append(f"ELU {name}: {st._stress_text('u')} > φ·Sy = {self.phi:g}·{st.sy:g} = "
-                       f"{self.phi * st.sy:.1f} MPa (utilización {st.utilization:.0%}) en {where}.")
+        ordered = sorted(self.strength_checks, key=lambda cc: cc[0] is not self.governing)  # estable
+        for comb, st in ordered:
+            where = _where(st.member, st.point)
+            if st.fs < 1.0:
+                out.append(f"ELU {comb.name}: {st._stress_text('u')} supera Sy = {st.sy:g} MPa "
+                           f"(fluencia) en {where}.")
+            elif not st.strength_ok:
+                out.append(f"ELU {comb.name}: {st._stress_text('u')} > φ·Sy = {self.phi:g}·{st.sy:g} = "
+                           f"{self.phi * st.sy:.1f} MPa (utilización {st.utilization:.0%}) en {where}.")
         comb_s, chk_s = self.stability_governing
         cs = chk_s.critical_stability
         if cs is not None and not chk_s.stability_ok:
@@ -961,9 +1033,9 @@ def check_combinations(
                             effective_length_factor_k=effective_length_factor_k))
         for comb, res in zip(uls_combinations, results, strict=False)
     )
-    k_gov = max(range(len(strength_checks)),
-                key=lambda k: max(strength_checks[k][1].utilization,
-                                  strength_checks[k][1].stability_utilization))
+    # Gobierna resistencia la de máxima σ_u/(φ·Sy) (máximo de la envolvente de tensiones). La estabilidad
+    # NO interviene acá: su combinación crítica es `CombinationCheck.stability_governing`.
+    k_gov = max(range(len(strength_checks)), key=lambda k: strength_checks[k][1].utilization)
     service_check = check_safety(model, results[-1], fs_min=1.0 / phi,
                                  deflection_limit_ratio=deflection_limit_ratio,
                                  reference_length=reference_length)
