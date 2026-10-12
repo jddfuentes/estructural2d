@@ -24,6 +24,7 @@ from core.materials import (
     rhs,
     solid_rect,
 )
+from core.model import Member, Model, NodalLoad, Support
 from core.model import SupportType as ST
 from core.solver import solve
 from core.verification import Status, check_safety, required_section_modulus
@@ -43,6 +44,28 @@ def test_catalog_consistency():
             assert s.A > 0 and s.I > 0 and s.W > 0
             # Radio de giro físicamente razonable: r < h/2
             assert math.sqrt(s.I / s.A) < s.h / 2
+
+
+def test_suggest_section_stability_rejects_slender_column():
+    """Una columna esbelta no acepta el perfil liviano si se activa AISC E3/H1."""
+    material = MATERIALS["ASTM A36"]
+
+    def build(section):
+        return Model(
+            nodes=[(0.0, 0.0), (0.0, 3000.0)],
+            members=[Member(0, 1, section, material)],
+            supports=[Support(0, ST.FIXED)],
+            nodal_loads=[NodalLoad(1, Fy=-25_000.0)],
+        )
+
+    suggestion = suggest_section(
+        build, "IPE", 1.5, deflection_limit_ratio=0.0, phi=0.9,
+        stability=True, effective_length_factor_k=2.0,
+    )
+    assert suggestion is not None
+    assert suggestion.combination is not None
+    assert suggestion.combination.stability_ok
+    assert suggestion.section.name != "IPE 80"
 
 
 def test_hollow_sections_geometry():

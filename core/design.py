@@ -43,6 +43,10 @@ def suggest_section(
     max_deflection: float | None = None,
     deflection_limit_ratio: float = DEFLECTION_LIMIT_DEFAULT,
     phi: float | None = None,
+    *,
+    stability: bool = False,
+    unbraced_length: float | None = None,
+    effective_length_factor_k: float = 1.0,
 ) -> Suggestion | None:
     """Perfil de menor área de `family` que verifica resistencia y flecha.
 
@@ -70,11 +74,18 @@ def suggest_section(
                  else deflection_limit_ratio)
         try:
             if phi is not None:
-                comb = check_combinations(model, phi=phi, deflection_limit_ratio=ratio)
+                comb = check_combinations(
+                    model, phi=phi, deflection_limit_ratio=ratio, stability=stability,
+                    unbraced_length=unbraced_length,
+                    effective_length_factor_k=effective_length_factor_k,
+                )
                 if comb.ok:
                     return Suggestion(sec, comb.strength, comb)
                 continue
-            chk = check_safety(model, solve(model), fs_min, deflection_limit_ratio=ratio)
+            chk = check_safety(
+                model, solve(model), fs_min, deflection_limit_ratio=ratio, stability=stability,
+                unbraced_length=unbraced_length, effective_length_factor_k=effective_length_factor_k,
+            )
         except StructuralError:
             return None
         if chk.ok:

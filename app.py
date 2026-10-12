@@ -19,7 +19,7 @@ from core.materials import Section, family_warnings
 from core.model import COMB_SERVICE_D_L, LoadCase, Model, SupportType
 from core.reports import build_pdf_report
 from core.solver import Results, StructuralError, solve_load_cases
-from core.verification import FS_MIN_DEFAULT, CombinationCheck, Status, check_combinations
+from core.verification import FS_MIN_DEFAULT, SLENDERNESS_MAX, CombinationCheck, Status, check_combinations
 from ui.inputs import AppInputs, sidebar
 from ui.plots import plot_diagram, plot_structure
 from ui.theory import render_theory
@@ -66,12 +66,21 @@ def verdict_badge(chk: CombinationCheck) -> None:
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
-def _analysis(key: str, _model: Model, deflection_limit_ratio: float
-              ) -> tuple[dict[LoadCase, Results], CombinationCheck]:
+def _analysis(
+    key: str,
+    _model: Model,
+    deflection_limit_ratio: float,
+    stability: bool = False,
+    unbraced_length: float | None = None,
+    effective_length_factor_k: float = 1.0,
+) -> tuple[dict[LoadCase, Results], CombinationCheck]:
     """D y L se resuelven UNA vez (K ensamblada una vez); las combinaciones se superponen."""
     cases = solve_load_cases(_model)
-    return cases, check_combinations(_model, deflection_limit_ratio=deflection_limit_ratio,
-                                     case_results=cases)
+    return cases, check_combinations(
+        _model, deflection_limit_ratio=deflection_limit_ratio, case_results=cases,
+        stability=stability, unbraced_length=unbraced_length,
+        effective_length_factor_k=effective_length_factor_k,
+    )
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
@@ -92,9 +101,12 @@ def _pdf(key: str, _model: Model, _chk: CombinationCheck, title: str, author: st
 
 @st.cache_data(show_spinner=False, max_entries=16)
 def _suggestion(key: str, _build: Callable[[Section], Model], family: str,
-                deflection_limit_ratio: float, phi: float) -> Suggestion | None:
+                deflection_limit_ratio: float, phi: float, stability: bool,
+                unbraced_length: float | None, effective_length_factor_k: float) -> Suggestion | None:
     return suggest_section(_build, family, FS_MIN_DEFAULT,  # fs_min no se usa con φ
-                           deflection_limit_ratio=deflection_limit_ratio, phi=phi)
+                           deflection_limit_ratio=deflection_limit_ratio, phi=phi,
+                           stability=stability, unbraced_length=unbraced_length,
+                           effective_length_factor_k=effective_length_factor_k)
 
 
 def reactions_table(model: Model, res: Results) -> pd.DataFrame:
@@ -123,7 +135,10 @@ def main() -> None:
     try:
         model = inp.model()
         key = repr(model)
-        case_results, chk = _analysis(key, model, inp.deflection_limit_ratio)
+        case_results, chk = _analysis(
+            key, model, inp.deflection_limit_ratio, inp.stability, inp.unbraced_length_mm,
+            inp.effective_length_factor_k,
+        )
     except (ValueError, StructuralError) as exc:
         st.error(f"**No se pudo resolver el modelo:** {exc}")
         if model is not None:
@@ -154,6 +169,25 @@ def main() -> None:
     )
     c4.metric("δ máx", f"{chk.delta_max:.2f} mm", help=f"Flecha ELS; {limit_help}",
               delta=f"L/{ratio:,.0f}" if ratio != float("inf") else None, delta_color="off")
+    if inp.stability:
+        cs = chk.stability_governing[1].critical_stability
+        if cs is not None:
+            col = cs.column
+            ltb = cs.ltb
+            st.subheader("Estabilidad de barras físicas")
+            s1, s2, s3, s4, s5 = st.columns(5)
+            s1.metric("λ = KL/r", f"{col.slenderness:.0f}",
+                      delta=f"límite E2 {SLENDERNESS_MAX:g}", delta_color="off",
+                      help=f"Transición E3 inelástico/elástico: λ = {col.slenderness_limit:.0f}")
+            s2.metric("φPn", f"{col.phi_Pn / 1e3:.1f} kN",
+                      help=f"Pn = {col.Pn / 1e3:.1f} kN · {col.regime.value}")
+            s3.metric("N/(φPn)", f"{col.utilization:.0%}")
+            s4.metric("φMn (PLT)", f"{ltb.phi_Mn / 1e6:.2f} kN·m",
+                      help=f"Mn = {ltb.Mn / 1e6:.2f} kN·m · {ltb.zone.value}")
+            s5.metric("H1", f"{cs.utilization:.0%}",
+                      help=f"{cs.mode}; M/(φMn) = {ltb.utilization:.0%}")
+            if not chk.stability_ok:
+                st.error("ALERTA: Falla por pandeo flexional / PLT. Revisá K, Lb o la sección.")
 
     if strength.shear_governs:
         st.warning("El factor de seguridad está gobernado por corte en el eje neutro "
@@ -236,8 +270,12 @@ def _design_tab(inp: AppInputs, chk: CombinationCheck) -> None:
              + (f" y δ ≤ L/{inp.deflection_limit_ratio:g} con {chk.service_combination.name}"
                 if inp.deflection_limit_ratio else "") + ":")
     # Mismo criterio que el veredicto superior: verificación completa por combinaciones
-    sug = _suggestion(f"{repr(inp.model())}|{inp.family}", inp.builder, inp.family,
-                      inp.deflection_limit_ratio, chk.phi)
+    sug = _suggestion(
+        f"{repr(inp.model())}|{inp.family}|{inp.stability}|{inp.unbraced_length_mm}|"
+        f"{inp.effective_length_factor_k}",
+        inp.builder, inp.family, inp.deflection_limit_ratio, chk.phi, inp.stability,
+        inp.unbraced_length_mm, inp.effective_length_factor_k,
+    )
     if sug is None:
         st.error("Ningún perfil de la familia verifica. Probá otra familia o reducí la luz/cargas.")
         return

@@ -47,6 +47,9 @@ class AppInputs:
     builder: Callable[[Section], Model]  # rearma el modelo con otro perfil (predimensionamiento)
     span_mm: float
     deflection_limit_ratio: float = 300.0
+    stability: bool = False
+    effective_length_factor_k: float = 1.0
+    unbraced_length_mm: float | None = None
 
     def model(self) -> Model:
         return self.builder(self.section)
@@ -199,6 +202,17 @@ def sidebar() -> AppInputs:
             "Límite de flecha L/…", min_value=0.0, value=300.0, step=50.0,
             help="0 = sin límite de flecha",
         )
+        stability = st.checkbox("Verificar estabilidad (Pandeo flexional y PLT)", value=False)
+        effective_length_factor_k = st.number_input(
+            "Factor de longitud efectiva K", min_value=0.01, value=1.0, step=0.05,
+            disabled=not stability,
+            help="K·L se aplica a la longitud de la barra física.",
+        )
+        lb_m = st.number_input(
+            "Lb no arriostrada [m] (0 = longitud de barra física)",
+            min_value=0.0, value=0.0, step=0.1, disabled=not stability,
+            help="Se limita a la longitud de cada barra física.",
+        )
         tension_side = st.toggle("Momento del lado traccionado", value=True)
         auto = st.toggle("Escala de deformada automática", value=True)
         scale = None if auto else st.number_input("Factor de escala", min_value=1.0, value=100.0, step=10.0)
@@ -206,7 +220,9 @@ def sidebar() -> AppInputs:
     return AppInputs(kind=kind, material=material, section=section, column_section=column_section,
                      family=family, moment_tension_side=tension_side,
                      deformed_scale=scale, builder=builder, span_mm=span,
-                     deflection_limit_ratio=deflection_limit_ratio)
+                     deflection_limit_ratio=deflection_limit_ratio, stability=stability,
+                     effective_length_factor_k=effective_length_factor_k,
+                     unbraced_length_mm=(lb_m * M if stability and lb_m > 0.0 else None))
 
 
 def _beam_inputs(material: Material, self_weight: bool) -> tuple[Callable[[Section], Model], float]:
