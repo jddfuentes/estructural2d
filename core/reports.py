@@ -114,20 +114,25 @@ VERDICT_TEXT: dict[Status, str] = {
     Status.ALERT: "ALERTA",
     Status.FAIL: "FLUENCIA — σ<sub>máx</sub> supera Sy",
 }
+VERDICT_TEXT_UNSTABLE = "INESTABILIDAD — pandeo / PLT con resistencias nominales"
 
 
 def _verdict_text(check: SafetyCheck) -> str:
-    """Veredicto con el motivo: resistencia (FS) y/o servicio (flecha)."""
+    """Veredicto con el motivo: resistencia (FS), estabilidad (pandeo / PLT) y/o servicio (flecha)."""
     if check.status is Status.OK:
         return VERDICT_TEXT[Status.OK] + (" — corte combinado gobierna" if check.shear_governs else "")
+    # FAIL sin fluencia: lo provoca la inestabilidad con resistencias nominales.
+    unstable_head = check.status is Status.FAIL and check.fs >= 1.0
     reasons = []
     if check.status is Status.ALERT and not check.strength_ok:
         reasons.append("FS menor al admisible")
+    if not check.stability_ok and not unstable_head:
+        reasons.append("estabilidad (pandeo / PLT) no verifica")
     if check.shear_governs:
         reasons.append("corte combinado gobierna")
     if not check.deflection_ok:
         reasons.append("flecha mayor a la admisible (servicio)")
-    head = VERDICT_TEXT[check.status]
+    head = VERDICT_TEXT_UNSTABLE if unstable_head else VERDICT_TEXT[check.status]
     if not reasons:
         return head
     return head + (" — " if check.status is Status.ALERT else " · ") + " y ".join(reasons)
@@ -695,6 +700,9 @@ def _combination_verdict_text(check: CombinationCheck) -> tuple[Status, str]:
         "NO VERIFICA": f"{s}<sub>u</sub> &gt; {f}·S<sub>y</sub> (ELU {gov})",
         "ALERTA": f"flecha de servicio mayor a la admisible (ELS {escape(check.service_combination.name)})",
     }.get(label)
+    if label == "NO VERIFICA" and not check.stability_ok:
+        stab = f"pandeo / PLT (ELU {escape(check.stability_governing[0].name)})"
+        detail = stab if check.strength_ok else f"{detail}; {stab}"
     if check.strength.shear_governs:
         detail = (detail + "; " if detail else "") + "corte combinado gobierna"
     head = VERDICT_TEXT[Status.OK] if label == "VERIFICA" else label

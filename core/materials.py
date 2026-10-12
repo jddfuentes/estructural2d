@@ -27,6 +27,19 @@ orientada para flexionar en su eje débil dentro del plano del pórtico; en cana
   Reproduce Wpl/2 e Iz de tabla con error < 1 %.
 - IPN y UPN (alas inclinadas, tf = espesor medio de tabla): Q por geometría con tf medio
   (≈ S_x de tabla); Iy y, en UPN, e = distancia del baricentro al dorso del alma, de tabla.
+
+Estabilidad (pandeo flexional y lateral-torsional, AISC 360-16 / CIRSOC 301-2005): radios de giro
+r_x = √(I/A), r_y = √(Iy/A); módulo plástico Z = 2·Q_max en secciones simétricas respecto del eje de
+flexión (exacto: el eje neutro plástico coincide con el elástico). Doble T y canales llevan además J
+(torsión de Saint-Venant), Cw (alabeo) y h0 (distancia entre baricentros de alas):
+- IPE y W: J = 2/3·b·tf³ + 1/3·(h − 2tf)·tw³ + 2·α·D⁴ − 0,420·tf⁴ (El Darwish y Johnston, 1965; usada en
+  las tablas ArcelorMittal y en AISC Design Guide 9 §3.2), con el radio r de acuerdo deducido del área;
+  reproduce It de tabla con error < 1 %. Cw = Iy·h0²/4, h0 = h − tf.
+- IPN: J por rectángulos sin acuerdos (≈ 15 % menor que tabla, conservador); Cw = Iy·h0²/4 con Iy de
+  tabla (reproduce Iw de tabla con error < 1 %).
+- UPN y C conformado (pared delgada, AISC Design Guide 9 §3.2): b' = b − tw/2, h0 = h − tf,
+  J = (2·b'·tf³ + h0·tw³)/3, Cw = tf·b'³·h0²/12 · (3·b'·tf + 2·h0·tw)/(6·b'·tf + h0·tw). En UPN, con tf
+  medio, Cw resulta ≈ 15 % mayor que el de tabla (alas en cuña): aproximación de predimensionamiento.
 """
 
 from __future__ import annotations
@@ -114,18 +127,30 @@ class Section:
     c_y2: float = 0.0  # Eje débil: distancia a la fibra extrema del lado 2 (puntas de ala) [mm]
     Q_y: float = 0.0  # Momento estático para corte en flexión de eje débil [mm³]
     t_y: float = 0.0  # Espesor resistente al corte en flexión de eje débil [mm]
+    # ---- Estabilidad (pandeo flexional / lateral-torsional) — agregados al final (AGENTS.md §5) ---- #
+    Z: float = 0.0  # Módulo plástico respecto del eje de flexión [mm³]; 0 = sin dato (se usa W)
+    Z_y: float = 0.0  # Módulo plástico respecto del eje débil [mm³]; 0 = sin dato
+    J: float = 0.0  # Constante de torsión de Saint-Venant [mm⁴]; 0 = sin dato
+    Cw: float = 0.0  # Constante de alabeo [mm⁶]; 0 = sin dato (sólo doble T y canales)
+    h0: float = 0.0  # Distancia entre baricentros de alas [mm]; 0 = sin dato (sólo doble T y canales)
 
     def __post_init__(self) -> None:
-        extra = (self.Q_max, self.t_web, self.Iy, self.Wy, self.c_y1, self.c_y2, self.Q_y, self.t_y)
+        extra = (self.Q_max, self.t_web, self.Iy, self.Wy, self.c_y1, self.c_y2, self.Q_y, self.t_y,
+                 self.Z, self.Z_y, self.J, self.Cw, self.h0)
         if not all(v >= 0.0 for v in extra):  # también rechaza NaN
             raise ValueError(
-                f"Sección {self.name!r}: Q, t, Iy, Wy y distancias de eje débil deben ser ≥ 0."
+                f"Sección {self.name!r}: Q, t, Iy, Wy, Z, J, Cw, h0 y distancias de eje débil deben ser ≥ 0."
             )
         if self.Iy > 0.0 and self.c_y1 == 0.0 and self.c_y2 == 0.0 and self.b > 0.0:
             object.__setattr__(self, "c_y1", self.b / 2.0)
             object.__setattr__(self, "c_y2", self.b / 2.0)
         if self.Iy > 0.0 and self.Wy == 0.0 and self.c_y_max > 0.0:
             object.__setattr__(self, "Wy", self.Iy / self.c_y_max)
+        # Módulo plástico de secciones simétricas respecto del eje: Z = 2·Q (media sección), exacto.
+        if self.Z == 0.0 and self.Q_max > 0.0 and math.isclose(self.c_top, self.c_bot):
+            object.__setattr__(self, "Z", 2.0 * self.Q_max)
+        if self.Z_y == 0.0 and self.Q_y > 0.0 and self.c_y1 > 0.0 and math.isclose(self.c_y1, self.c_y2):
+            object.__setattr__(self, "Z_y", 2.0 * self.Q_y)
 
     @property
     def c_max(self) -> float:
@@ -161,11 +186,47 @@ class Section:
         """Q_max / (I·t_web) [1/mm²]: τ_máx = |V|·shear_factor. 0 si no hay datos de corte."""
         return self.Q_max / (self.I * self.t_web) if self.has_shear_data else 0.0
 
+    # ---- Estabilidad ---- #
+
+    @property
+    def r_x(self) -> float:
+        """Radio de giro respecto del eje de flexión (el de `I`) r_x = √(I/A) [mm]."""
+        return math.sqrt(self.I / self.A) if self.A > 0.0 and self.I > 0.0 else 0.0
+
+    @property
+    def r_y(self) -> float:
+        """Radio de giro respecto del otro eje principal (el de `Iy`) r_y = √(Iy/A) [mm]; 0 sin Iy."""
+        return math.sqrt(self.Iy / self.A) if self.A > 0.0 and self.Iy > 0.0 else 0.0
+
+    @property
+    def r_min(self) -> float:
+        """Radio de giro mínimo r_min = mín(r_x, r_y) [mm] (gobierna el pandeo flexional).
+
+        Sin Iy (p. ej. `custom` sin Iy) sólo se conoce r_x: se devuelve r_x (pandeo en el plano).
+        """
+        return min((r for r in (self.r_x, self.r_y) if r > 0.0), default=0.0)
+
+    @property
+    def has_ltb_data(self) -> bool:
+        """Hay Iy, J, Cw y h0 para el pandeo lateral-torsional de doble T y canales (AISC 360 F2)."""
+        return self.Iy > 0.0 and self.J > 0.0 and self.Cw > 0.0 and self.h0 > 0.0
+
+    @property
+    def r_ts(self) -> float:
+        """Radio de giro efectivo para PLT r_ts = √(√(Iy·Cw) / S) [mm] (AISC 360-16 ec. F2-7).
+
+        En doble T simétricos equivale a r_ts² = Iy·h0 / (2·S). 0 si faltan Iy o Cw.
+        """
+        if not (self.Iy > 0.0 and self.Cw > 0.0):
+            return 0.0
+        return math.sqrt(math.sqrt(self.Iy * self.Cw) / self.W)
+
     def weak_axis(self, flip: bool = False) -> Section:
         """Misma sección orientada para flexionar en su eje débil dentro del plano del pórtico.
 
         Intercambia los ejes: I ↔ Iy, (c_top, c_bot) ↔ (c_y1, c_y2), Q_max ↔ Q_y, t_web ↔ t_y,
-        h ↔ b. Por defecto la fibra superior es el lado 1 (dorso del alma en canales); `flip=True`
+        h ↔ b, Z ↔ Z_y (J, Cw y h0 no dependen del eje; en eje débil no hay PLT, I < Iy). Por defecto la
+        fibra superior es el lado 1 (dorso del alma en canales); `flip=True`
         invierte la sección (puntas de ala arriba). `s.weak_axis().weak_axis()` devuelve `s`.
 
         Raises:
@@ -183,6 +244,7 @@ class Section:
             c_top=c_top, c_bot=c_bot, h=self.b if self.b > 0.0 else self.c_y1 + self.c_y2, b=self.h,
             Q_max=self.Q_y, t_web=self.t_y, Iy=self.I, Wy=self.W,
             c_y1=self.c_top, c_y2=self.c_bot, Q_y=self.Q_max, t_y=self.t_web,
+            Z=self.Z_y, Z_y=self.Z, J=self.J, Cw=self.Cw, h0=self.h0,
         )
 
     @property
@@ -224,6 +286,42 @@ def _i_shape_shear_weak(
     return Q, Iz
 
 
+def _i_shape_torsion(
+    h: float, b: float, tw: float, tf: float, A: float, Iz: float, fillets: bool
+) -> tuple[float, float, float]:
+    """(J [mm⁴], Cw [mm⁶], h0 [mm]) de un doble T simétrico.
+
+    J = 2/3·b·tf³ + 1/3·(h − 2tf)·tw³ [+ 2·α·D⁴ − 0,420·tf⁴ con acuerdos de radio r] (El Darwish y
+    Johnston 1965; AISC Design Guide 9 §3.2), α = −0,042 + 0,2204·tw/tf + 0,1355·r/tf
+    − 0,0865·r·tw/tf² − 0,0725·tw²/tf², D = [(tf + r)² + tw·(r + tw/4)] / (2r + tf); r deducido del área
+    de tabla como en `_i_shape_shear_weak`. Cw = Iz·h0²/4 con h0 = h − tf (AISC 360-16, nota F2).
+    """
+    h0 = h - tf
+    hw = h - 2.0 * tf
+    J = 2.0 * b * tf**3 / 3.0 + hw * tw**3 / 3.0
+    a_r = (A - (2.0 * b * tf + hw * tw)) / 4.0
+    if fillets and a_r > 0.0:
+        r = math.sqrt(a_r / _FILLET_AREA)
+        alpha = (-0.042 + 0.2204 * tw / tf + 0.1355 * r / tf - 0.0865 * r * tw / tf**2
+                 - 0.0725 * tw**2 / tf**2)
+        D = ((tf + r) ** 2 + tw * (r + tw / 4.0)) / (2.0 * r + tf)
+        J += 2.0 * alpha * D**4 - 0.420 * tf**4
+    return J, Iz * h0**2 / 4.0, h0
+
+
+def _channel_torsion(h: float, b: float, tw: float, tf: float) -> tuple[float, float, float]:
+    """(J [mm⁴], Cw [mm⁶], h0 [mm]) de un canal de pared delgada (AISC Design Guide 9 §3.2).
+
+    b' = b − tw/2, h0 = h − tf; J = (2·b'·tf³ + h0·tw³)/3;
+    Cw = tf·b'³·h0²/12 · (3·b'·tf + 2·h0·tw) / (6·b'·tf + h0·tw).
+    """
+    bp = b - tw / 2.0
+    h0 = h - tf
+    J = (2.0 * bp * tf**3 + h0 * tw**3) / 3.0
+    Cw = tf * bp**3 * h0**2 / 12.0 * (3.0 * bp * tf + 2.0 * h0 * tw) / (6.0 * bp * tf + h0 * tw)
+    return J, Cw, h0
+
+
 def rolled_i(
     name: str, family: str, h: float, b: float, A_cm2: float, I_cm4: float,
     tw: float = 0.0, tf: float = 0.0, Iz_cm4: float | None = None,
@@ -233,18 +331,21 @@ def rolled_i(
     Corte: Q_max por geometría, t_web = tw. Eje débil: Iy = `Iz_cm4` de tabla si se da (alas
     inclinadas, IPN); si no, por geometría con acuerdos (alas paralelas, IPE). c_y = b/2;
     corte en eje débil lo toman las dos alas: Q_y = tf·b²/4, t_y = 2·tf.
-    Sin tw/tf (compatibilidad): sólo flexión en eje fuerte, sin datos de corte ni eje débil.
+    Estabilidad: J, Cw, h0 con `_i_shape_torsion` (acuerdos sólo en alas paralelas).
+    Sin tw/tf (compatibilidad): sólo flexión en eje fuerte, sin datos de corte, eje débil ni PLT.
     """
     A = A_cm2 * 100.0
-    Q = Iz = 0.0
+    Q = Iz = J = Cw = h0 = 0.0
     if tw > 0.0 and tf > 0.0:
         Q, Iz = _i_shape_shear_weak(h, b, tw, tf, A, fillets=Iz_cm4 is None)
         if Iz_cm4 is not None:
             Iz = Iz_cm4 * 1e4
+        J, Cw, h0 = _i_shape_torsion(h, b, tw, tf, A, Iz, fillets=Iz_cm4 is None)
     return Section(
         name=name, family=family, A=A, I=I_cm4 * 1e4,
         c_top=h / 2.0, c_bot=h / 2.0, h=h, b=b,
         Q_max=Q, t_web=tw, Iy=Iz, Q_y=tf * b**2 / 4.0, t_y=2.0 * tf,
+        J=J, Cw=Cw, h0=h0,
     )
 
 
@@ -259,16 +360,19 @@ def rolled_channel(
     Eje débil (asimétrico): Iy = `Iz_cm4` y e = `e_cm` de tabla (baricentro al dorso del alma):
     c_y1 = e, c_y2 = b − e, Wy = Iy/(b − e). Corte en eje débil por las dos alas cortadas en el eje
     neutro: Q_y = 2·tf·(b − e)²/2 = tf·(b − e)², t_y = 2·tf (alas de espesor medio).
+    Estabilidad: J, Cw, h0 de pared delgada con tf medio (`_channel_torsion`).
     """
     Q = b * tf * (h - tf) / 2.0 + tw * (h / 2.0 - tf) ** 2 / 2.0 if tw > 0.0 and tf > 0.0 else 0.0
     e = e_cm * 10.0
     has_weak = Iz_cm4 > 0.0 and 0.0 < e < b
+    J, Cw, h0 = _channel_torsion(h, b, tw, tf) if has_weak and tw > 0.0 and tf > 0.0 else (0.0, 0.0, 0.0)
     return Section(
         name=name, family="UPN", A=A_cm2 * 100.0, I=I_cm4 * 1e4,
         c_top=h / 2.0, c_bot=h / 2.0, h=h, b=b,
         Q_max=Q, t_web=tw, Iy=Iz_cm4 * 1e4 if has_weak else 0.0,
         c_y1=e if has_weak else 0.0, c_y2=b - e if has_weak else 0.0,
         Q_y=tf * (b - e) ** 2 if has_weak else 0.0, t_y=2.0 * tf if has_weak else 0.0,
+        J=J, Cw=Cw, h0=h0,
     )
 
 
@@ -280,14 +384,17 @@ def wide_flange(
 
     `d` es la altura real del perfil (no la nominal de la designación). Con tw y tf [mm]: Q_max e
     Iy por geometría con acuerdos (ver `_i_shape_shear_weak`), t_web = tw, Q_y = tf·bf²/4, t_y = 2tf.
+    Estabilidad: J, Cw, h0 con acuerdos (`_i_shape_torsion`).
     """
-    Q = Iz = 0.0
+    Q = Iz = J = Cw = h0 = 0.0
     if tw > 0.0 and tf > 0.0:
         Q, Iz = _i_shape_shear_weak(d, bf, tw, tf, A, fillets=True)
+        J, Cw, h0 = _i_shape_torsion(d, bf, tw, tf, A, Iz, fillets=True)
     return Section(
         name=name, family="Perfil W", A=A, I=I,
         c_top=d / 2.0, c_bot=d / 2.0, h=d, b=bf,
         Q_max=Q, t_web=tw, Iy=Iz, Q_y=tf * bf**2 / 4.0, t_y=2.0 * tf,
+        J=J, Cw=Cw, h0=h0,
     )
 
 
@@ -336,11 +443,14 @@ def cold_formed_channel(name: str, H: float, B: float, t: float, r_i: float | No
     # muy cortas, e < r_o, se desprecia la porción de esquina pasado el eje: aproximación).
     x_cut = max(e, r_o)
     Q_y = 2.0 * t * (B - x_cut) * ((B + x_cut) / 2.0 - e)
+    # Estabilidad: modelo de línea media de pared delgada con tf = tw = t (esquinas rectas).
+    J, Cw, h0 = _channel_torsion(H, B, t, t)
     return Section(
         name=name, family="Perfil C (Conformado)",
         A=A, I=I_web + 2.0 * (I_fl + I_c),
         c_top=H / 2.0, c_bot=H / 2.0, h=H, b=B,
         Q_max=Q, t_web=t, Iy=Ixx - A * e**2, c_y1=e, c_y2=B - e, Q_y=Q_y, t_y=2.0 * t,
+        J=J, Cw=Cw, h0=h0,
     )
 
 
@@ -400,15 +510,18 @@ def solid_round(name: str, d: float) -> Section:
 def custom(
     name: str, A: float, I: float, c: float,  # noqa: E741
     *, Q_max: float = 0.0, t_web: float = 0.0, Iy: float = 0.0, Wy: float = 0.0,
+    Z: float = 0.0, J: float = 0.0, Cw: float = 0.0, h0: float = 0.0,
 ) -> Section:
     """Sección definida por el usuario (simétrica en el plano de flexión).
 
     Q_max y t_web opcionales: sin ellos no se calcula τ (verificación de flexión pura).
-    Iy y Wy opcionales (sólo informativos: sin distancias de eje débil no admite `weak_axis()`).
+    Iy y Wy opcionales (sin distancias de eje débil no admite `weak_axis()`); Iy da r_y para pandeo.
+    Estabilidad opcional: Z (si no, 2·Q_max o, sin Q, se usa W), y J, Cw, h0 para el PLT de un doble T o
+    canal (AISC 360 F2); sin ellos el PLT no se evalúa.
     """
     return Section(
         name=name, family="Personalizado", A=A, I=I, c_top=c, c_bot=c, h=2.0 * c,
-        Q_max=Q_max, t_web=t_web, Iy=Iy, Wy=Wy,
+        Q_max=Q_max, t_web=t_web, Iy=Iy, Wy=Wy, Z=Z, J=J, Cw=Cw, h0=h0,
     )
 
 
@@ -571,6 +684,12 @@ CHANNEL_FAMILIES: frozenset[str] = frozenset({"UPN", "Perfil C (Conformado)"})
 
 THIN_WALLED_FAMILIES: frozenset[str] = frozenset({"Perfil C (Conformado)"})
 """Familias de chapa delgada conformada en frío, donde la abolladura local puede gobernar."""
+
+CLOSED_FAMILIES: frozenset[str] = frozenset({"Tubo circular", "Tubo cuadrado", "Tubo rectangular"})
+"""Secciones cerradas: el PLT no gobierna en proporciones usuales (AISC 360-16 F7, F8)."""
+
+SOLID_FAMILY = "Macizo"
+"""Barras macizas: rectangulares de canto con PLT según AISC 360-16 F11; redondas sin PLT."""
 
 CHANNEL_TORSION_WARNING = (
     "Sección en canal (U/C): el centro de corte queda del lado exterior del alma. Si la carga "
