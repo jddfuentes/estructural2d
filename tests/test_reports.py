@@ -71,6 +71,19 @@ def test_returns_valid_pdf_bytes():
     pdf = build_pdf_report(m, r, c, "Viga de prueba", "J. Fuentes", date=DATE)
     assert isinstance(pdf, bytes)
     assert pdf.startswith(b"%PDF")
+
+
+def test_stability_report_contains_buckling_rows():
+    """La memoria con estabilidad documenta pandeo/PLT y conserva la salida PDF válida."""
+    m, r, _ = _beam(section="IPE 300")
+    c = check_safety(m, r, deflection_limit_ratio=0.0, stability=True)
+    pdf = build_pdf_report(m, r, c, date=DATE, include_figures=False)
+    assert pdf.startswith(b"%PDF")
+    text = _flat(_text(pdf))
+    assert "Esbeltez" in text
+    assert "Resistencia de diseño a compresión" in text
+    assert "Momento resistente con PLT" in text
+    assert "Interacción AISC H1" in text
     assert pdf.rstrip().endswith(b"%%EOF")
     assert len(pdf) > 2_000
 

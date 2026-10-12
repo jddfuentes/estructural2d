@@ -173,6 +173,24 @@ NOTATION: tuple[Group, ...] = (
             Entry("GDL", "Grado de libertad nodal (u_{x}, u_{y}, θ_{z})."),
         ),
     ),
+    Group(
+        "Estabilidad",
+        (
+            Entry(
+                "P_{n}, φP_{n}", "Resistencia nominal y de diseño a compresión por pandeo flexional.", "kN"
+            ),
+            Entry("M_{n}, φM_{n}", "Momento resistente nominal y de diseño considerando PLT.", "kN·m"),
+            Entry("λ", "Esbeltez geométrica λ = K·L/r_{min}."),
+            Entry("L_{b}", "Longitud no arriostrada lateralmente.", "mm / m"),
+            Entry(
+                "L_{p}, L_{r}", "Longitudes límite de arriostramiento para plastificación y PLT.", "mm / m"
+            ),
+            Entry("r_{min}, r_{ts}", "Radios de giro mínimo y torsional de la sección.", "mm"),
+            Entry("J", "Constante torsional de Saint-Venant.", "cm^{4}"),
+            Entry("C_{w}", "Constante de alabeo de la sección.", "cm^{6}"),
+            Entry("H1", "Interacción AISC H1 de compresión y flexión."),
+        ),
+    ),
 )
 
 # --------------------------------------------------------------------------- #

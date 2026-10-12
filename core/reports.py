@@ -245,7 +245,7 @@ def build_pdf_report(
         story += _embedded_plot(image_bytes)
     story += _section_results(model, results, L_ref, figs, combo)
     story += _section_verification(check)
-    story += _section_limitations(model)
+    story += _section_limitations(model, check)
     if include_glossary:
         story += _section_glossary()
     doc.build(story, canvasmaker=_NumberedCanvas)
@@ -423,7 +423,7 @@ def _criteria_items(check: SafetyCheck | CombinationCheck, L_ref: float) -> list
         n = check.service_check.deflection_limit_ratio
         svc = check.service_combination.name
         uls = " y ".join(comb.name for comb, _ in check.strength_checks)
-        return [
+        items = [
             "Hipótesis de carga D (permanente, incluye peso propio) y L (sobrecarga de uso); "
             "combinaciones por superposición lineal (CIRSOC 301-2005 §A.4.2 / AISC 360-16 §B2).",
             f"Resistencia (ELU, LRFD): envolvente de {uls} con cargas mayoradas; tensión normal "
@@ -436,15 +436,27 @@ def _criteria_items(check: SafetyCheck | CombinationCheck, L_ref: float) -> list
              if n > 0 else
              f"Servicio (ELS): flecha bajo {svc} (cargas sin mayorar), sin límite (sólo se informa L/{d})."),
         ]
-    return [
-        f"Criterio de verificación: tensión normal elástica en fibra extrema "
-        f"{s} = N/A ± M·c/I; FS = S<sub>y</sub> / {s}<sub>máx</sub> ≥ FS<sub>adm</sub> = {check.fs_min:g}.",
-        (f"Criterio de servicio: flecha {d}<sub>máx</sub> ≤ {d}<sub>adm</sub> = "
-         f"L/{check.deflection_limit_ratio:g}, con {d}<sub>máx</sub> el desplazamiento total máximo "
-         f"de la estructura y L = {L_ref * _M:.3f} m."
-         if check.deflection_limit_ratio > 0 else
-         "Criterio de servicio: sin límite de flecha (sólo se informa L/δ)."),
-    ]
+    else:
+        items = [
+            f"Criterio de verificación: tensión normal elástica en fibra extrema "
+            f"{s} = N/A ± M·c/I; FS = S<sub>y</sub> / {s}<sub>máx</sub> ≥ "
+            f"FS<sub>adm</sub> = {check.fs_min:g}.",
+            (f"Criterio de servicio: flecha {d}<sub>máx</sub> ≤ {d}<sub>adm</sub> = "
+             f"L/{check.deflection_limit_ratio:g}, con {d}<sub>máx</sub> el desplazamiento total máximo "
+             f"de la estructura y L = {L_ref * _M:.3f} m."
+             if check.deflection_limit_ratio > 0 else
+             "Criterio de servicio: sin límite de flecha (sólo se informa L/δ)."),
+        ]
+    stability = check.strength if isinstance(check, CombinationCheck) else check
+    if stability.stability:
+        cs = stability.critical_stability
+        if cs is not None:
+            items.append(
+                f"Estabilidad: pandeo flexional según AISC 360-16 §E3 y PLT según §F2/F11, "
+                f"con K = {cs.column.K:g}, λ = K·L/r = {cs.column.slenderness:.0f}, "
+                f"Lb = {cs.ltb.Lb * _M:.3f} m e interacción AISC H1."
+            )
+    return items
 
 
 def _section_inputs(model: Model, figs: _Figures | None) -> list[Flowable]:
@@ -665,6 +677,7 @@ def _section_verification(check: SafetyCheck | CombinationCheck) -> list[Flowabl
         ["Factor de seguridad admisible FS<sub>adm</sub>", f"{check.fs_min:g}"],
         [f"Aprovechamiento {_g('s')}<sub>máx</sub> · FS<sub>adm</sub> / S<sub>y</sub>",
          f"{check.utilization:.0%}"],
+        *_stability_rows(check),
         [f"Flecha máxima {_g('d')}<sub>máx</sub>", f"{check.delta_max:,.2f} mm"],
         [f"Flecha relativa L/{_g('d')} (L = {check.reference_length * _M:.3f} m)",
          f"<b>L/{check.deflection_ratio:,.0f}</b>" if math.isfinite(check.deflection_ratio) else "—"],
@@ -729,6 +742,7 @@ def _section_verification_combinations(check: CombinationCheck) -> list[Flowable
         ["Tensión tangencial máxima τ<sub>máx</sub>", f"{check.tau_max:,.1f} MPa"],
         ["Tensión de von Mises gobernante σ<sub>vM</sub>", f"{check.sigma_vm_max:,.1f} MPa"],
         [f"Utilización {s}<sub>u</sub> / ({f}·S<sub>y</sub>)", f"<b>{check.utilization:.0%}</b>"],
+        *_stability_rows(check.strength),
         [f"Flecha máxima ELS {d}<sub>máx</sub> ({escape(check.service_combination.name)})",
          f"{sv.delta_max:,.2f} mm"],
         [f"Flecha relativa L/{d} (L = {sv.reference_length * _M:.3f} m)",
@@ -767,11 +781,34 @@ def _families(model: Model) -> list[str]:
     return list(dict.fromkeys(mem.section.family for mem in model.members))
 
 
-def _section_limitations(model: Model) -> list[Flowable]:
+def _stability_rows(check: SafetyCheck) -> list[list[str]]:
+    cs = check.critical_stability
+    if cs is None:
+        return []
+    col, ltb = cs.column, cs.ltb
+    return [
+        ["Esbeltez λ = K·L/r", f"{col.slenderness:.1f} (límite recomendado 200)"],
+        ["Resistencia de diseño a compresión φPₙ", f"{col.phi_Pn * _KN:,.2f} kN "
+         f"(Pₙ = {col.Pn * _KN:,.2f} kN)"],
+        ["Momento resistente con PLT φMₙ", f"{ltb.phi_Mn * _KNM:,.2f} kN·m "
+         f"(Mₙ = {ltb.Mn * _KNM:,.2f} kN·m; {escape(ltb.zone.value)})"],
+        ["Interacción AISC H1", f"<b>{cs.utilization:.0%}</b> ({escape(cs.mode)})"],
+    ]
+
+
+def _section_limitations(model: Model, check: SafetyCheck | CombinationCheck) -> list[Flowable]:
     family_items = [w for fam in _families(model) for w in family_warnings(fam)]
-    items = [*dict.fromkeys(family_items),
-        "No se verifican pandeo flexional, pandeo lateral-torsional, abolladura local, tensiones de "
-        "corte ni combinadas (von Mises), fatiga ni efectos de segundo orden.",
+    stability = check.strength if isinstance(check, CombinationCheck) else check
+    stability_limit = (
+        "No se verifican pandeo flexional ni pandeo lateral-torsional (PLT); tampoco abolladura local, "
+        "fatiga ni efectos de segundo orden."
+        if not stability.stability else
+        "La estabilidad se evalúa en primer orden con K y Lb indicados; no se verifican abolladura local, "
+        "fatiga ni efectos de segundo orden."
+    )
+    items = [*dict.fromkeys(family_items), stability_limit,
+        "Las tensiones de corte y combinadas (von Mises) se evalúan sólo en los puntos "
+        "definidos por el modelo.",
         "Propiedades de sección nominales de catálogo; verificar contra el catálogo del proveedor.",
         "Documento de predimensionamiento: no reemplaza la memoria de cálculo reglamentaria "
         "(CIRSOC 301 / AISC 360) firmada por profesional matriculado.",
